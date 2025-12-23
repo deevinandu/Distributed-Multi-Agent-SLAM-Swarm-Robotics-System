@@ -8,11 +8,12 @@
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 
+#include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
 #include <sensor_msgs/msg/laser_scan.h>
 #include <sensor_msgs/msg/imu.h>
-
 #include "ekf.h"
+#include "motor_control.h"
 
 // Constants
 #define WIFI_SSID "SSID"
@@ -28,9 +29,16 @@ IPAddress agent_ip(192, 168, 1, 100);
 // Global Objects
 rcl_publisher_t odom_pub;
 rcl_publisher_t scan_pub;
+rcl_subscription_t cmd_sub;
+
 nav_msgs__msg__Odometry odom_msg;
 sensor_msgs__msg__LaserScan scan_msg;
 float scan_ranges[360]; 
+geometry_msgs__msg__twist__Twist cmd_msg;
+
+MotorController motor;
+unsigned long last_cmd_time = 0;
+const long CMD_TIMEOUT = 500; // ms
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -80,6 +88,24 @@ void readLiDAR(double t) {
     for (int i=0; i<360; i++) {
         scan_msg.ranges.data[i] = 2.0;
     }
+// Navigation Callback
+void cmd_vel_callback(const void * msin) {
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msin;
+    last_cmd_time = millis();
+
+    float linear_x = msg->linear.x;
+    float angular_z = msg->angular.z;
+
+    // Simple Differential Drive Kinematics
+    // Assuming max linear speed 0.5 m/s and max angular speed 1.0 rad/s
+    float left_v = linear_x - angular_z * 0.15; // Placeholder track width 0.15m
+    float right_v = linear_x + angular_z * 0.15;
+
+    // Map to PWM (-255 to 255)
+    int left_pwm = (int)(left_v * 510);   // 0.5 m/s -> 255
+    int right_pwm = (int)(right_v * 510);
+
+    motor.drive(left_pwm, right_pwm);
 }
 
 // IMU Callback (100Hz)
@@ -156,6 +182,12 @@ void setup() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
         "/" AGENT_ID "/scan"));
 
+    RCCHECK(rclc_subscription_init_default(
+        &cmd_sub,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/" AGENT_ID "/cmd_vel"));
+
     RCCHECK(rclc_timer_init_default(
         &imu_timer,
         &support,
@@ -168,12 +200,20 @@ void setup() {
         RCL_MS_TO_NS(100), // 10Hz
         pub_timer_callback));
 
-    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+    RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+    RCCHECK(rclc_executor_add_subscription(&executor, &cmd_sub, &cmd_msg, &cmd_vel_callback, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_timer(&executor, &imu_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &pub_timer));
+
+    motor.init();
 }
 
 void loop() {
-    delay(1); 
+    // Safety Timeout
+    if (millis() - last_cmd_time > CMD_TIMEOUT) {
+        motor.stop();
+    }
+    
     RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+    delay(10);
 }
