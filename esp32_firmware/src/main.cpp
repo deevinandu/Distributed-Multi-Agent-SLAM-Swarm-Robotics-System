@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUDP.h>
-#include <ArduinoJson.h>
 
 #include "ekf.h"
 #include "motor_control.h"
@@ -15,13 +14,30 @@
 // Constants
 #define WIFI_SSID "SSID"
 #define WIFI_PASSWORD "PASSWORD"
-#define AGENT_ID "agent_1"
+#define AGENT_ID 1 // Integer ID for binary protocol
 
-// PC IP Address for Agent Connection
-// The PC must be running udp_bridge.py and listening on port 8888
+// PC IP Address
 const char* agent_ip = "192.168.1.100"; 
 const int agent_port = 8888;
-const int local_port = 8888; // Port to listen for commands
+const int local_port = 8888;
+
+// Quasar-Lite Protocol Definitions
+// Packed to ensure no padding bytes, matching Python 'struct' alignment
+struct __attribute__((packed)) QuasarPacket {
+    char magic[4];       // "QSRL"
+    uint8_t agent_id;
+    float odom_x;
+    float odom_y;
+    float odom_yaw;
+    uint16_t scan_count; // Fixed 181
+    float ranges[181];
+};
+
+struct __attribute__((packed)) CommandPacket {
+    char magic[4];    // "CMD1"
+    float linear_x;
+    float angular_z;
+};
 
 // Global Objects
 WiFiUDP udp;
@@ -56,17 +72,13 @@ void readIMU(double t) {
 }
 
 void readEncoders(double t) {
-    current_encoder_odom.twist.twist.linear.x = 0.0; // Placeholder until encoder logic added
+    current_encoder_odom.twist.twist.linear.x = 0.0; 
     current_encoder_odom.twist.twist.angular.z = 0.0; 
 }
 
-// Perform blocking scan and return JSON Array
-DynamicJsonDocument readLiDAR() {
-    DynamicJsonDocument doc(16384); // Large buffer for scan data
-    JsonArray ranges = doc.createNestedArray("ranges");
-    
-    // Servo Scan Params
-    // Matches ROS LaserScan: -90 to +90 degrees
+// Blocking Scan -> Fills the packet logic directly
+void performScan(QuasarPacket& packet) {
+    packet.scan_count = 181;
     
     // Blocking Sweep 0 to 180
     for (int pos = 0; pos <= 180; pos++) {
@@ -75,15 +87,14 @@ DynamicJsonDocument readLiDAR() {
         
         uint16_t range_mm = sensor.readRangeSingleMillimeters();
         if (sensor.timeoutOccurred()) { 
-             ranges.add(0.0);
+             packet.ranges[pos] = 0.0;
         } else {
              float range_m = range_mm / 1000.0;
              if (range_m > 2.0) range_m = 0.0;
-             ranges.add(range_m);
+             packet.ranges[pos] = range_m;
         }
     }
-    servo.write(0); // Return info
-    return doc;
+    servo.write(0); 
 }
 
 void setup() {
@@ -113,7 +124,6 @@ void setup() {
 
     motor.init();
 
-    // WiFi
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
@@ -134,21 +144,18 @@ void loop() {
         motor.stop();
     }
 
-    // 2. Receive Commands (UDP)
+    // 2. Receive Commands (Binary)
     int packetSize = udp.parsePacket();
-    if (packetSize) {
-        char packetBuffer[255];
-        int len = udp.read(packetBuffer, 255);
-        if (len > 0) packetBuffer[len] = 0;
+    if (packetSize >= sizeof(CommandPacket)) {
+        CommandPacket cmd;
+        udp.read((char*)&cmd, sizeof(cmd)); // Read directly into struct
 
-        // Parse JSON: expected {"lx": 0.5, "az": 0.1}
-        StaticJsonDocument<200> cmd_doc;
-        DeserializationError error = deserializeJson(cmd_doc, packetBuffer);
-        
-        if (!error) {
+        // Validate Magic
+        if (strncmp(cmd.magic, "CMD1", 4) == 0) {
             last_cmd_time = current_millis;
-            float linear_x = cmd_doc["lx"];
-            float angular_z = cmd_doc["az"];
+            
+            float linear_x = cmd.linear_x;
+            float angular_z = cmd.angular_z;
             
             // Drive Motors
             float left_v = linear_x - angular_z * 0.15; 
@@ -171,35 +178,28 @@ void loop() {
         last_pub_time = current_millis;
 
         readEncoders(now_sec);
-        ekf.update(current_encoder_odom); // Update EKF with encoder data
+        ekf.update(current_encoder_odom); 
         
-        // Blocking Scan
-        DynamicJsonDocument scan_doc = readLiDAR();
-
-        // Prepare JSON Packet
-        // { "id": "agent_1", "odom": {...}, "scan": [...] }
-        DynamicJsonDocument packet_doc(20000); 
-        packet_doc["id"] = AGENT_ID;
+        // Prepare Packet
+        QuasarPacket packet;
+        memcpy(packet.magic, "QSRL", 4);
+        packet.agent_id = AGENT_ID;
         
         nav_msgs__msg__Odometry odom = ekf.getOdom();
-        JsonObject odom_json = packet_doc.createNestedObject("odom");
-        odom_json["x"] = odom.pose.pose.position.x;
-        odom_json["y"] = odom.pose.pose.position.y;
+        packet.odom_x = odom.pose.pose.position.x;
+        packet.odom_y = odom.pose.pose.position.y;
         
-        // Extract Yaw from Quaternion (Simplified)
+        // Yaw from Quaternion
         double qz = odom.pose.pose.orientation.z;
         double qw = odom.pose.pose.orientation.w;
-        double yaw = 2.0 * atan2(qz, qw);
-        odom_json["yaw"] = yaw;
+        packet.odom_yaw = (float)(2.0 * atan2(qz, qw));
 
-        packet_doc["scan"] = scan_doc["ranges"];
+        // Blocking Scan Fill
+        performScan(packet);
 
-        // Send UDP
-        char output[20000];
-        serializeJson(packet_doc, output);
-        
+        // Send Raw Binary
         udp.beginPacket(agent_ip, agent_port);
-        udp.write((const uint8_t*)output, strlen(output));
+        udp.write((const uint8_t*)&packet, sizeof(packet));
         udp.endPacket();
     }
 }
