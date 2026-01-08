@@ -15,6 +15,12 @@
 #include "ekf.h"
 #include "motor_control.h"
 
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <VL53L0X.h>
+#include <ESP32Servo.h>
+
 // Constants
 #define WIFI_SSID "SSID"
 #define WIFI_PASSWORD "PASSWORD"
@@ -53,6 +59,11 @@ EKF ekf;
 sensor_msgs__msg__Imu current_imu;
 nav_msgs__msg__Odometry current_encoder_odom;
 
+// Hardware Objects
+Adafruit_MPU6050 mpu;
+VL53L0X sensor;
+Servo servo;
+
 void error_loop(){
   while(1){
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
@@ -60,35 +71,59 @@ void error_loop(){
   }
 }
 
-// Stub: Generates synthetic IMU data (Circle motion, 100Hz)
 void readIMU(double t) {
-    current_imu.header.stamp.sec = (int)t;
-    current_imu.header.stamp.nanosec = (uint32_t)((t - (int)t) * 1e9);
-    current_imu.angular_velocity.z = 0.5; 
-    current_imu.linear_acceleration.z = 9.81;
+    sensors_event_t a, g, temp;
+    if (mpu.getEvent(&a, &g, &temp)) {
+        current_imu.header.stamp.sec = (int)t;
+        current_imu.header.stamp.nanosec = (uint32_t)((t - (int)t) * 1e9);
+        current_imu.angular_velocity.z = g.gyro.z; 
+        current_imu.linear_acceleration.z = a.acceleration.z;
+    }
 }
 
 // Stub: Generates synthetic Encoder data (10Hz)
+// NOTE: Still valid until real encoders are added
 void readEncoders(double t) {
-    current_encoder_odom.twist.twist.linear.x = 0.2; 
-    current_encoder_odom.twist.twist.angular.z = 0.5; 
+    current_encoder_odom.twist.twist.linear.x = 0.0; // Assume stopped if not moving
+    current_encoder_odom.twist.twist.angular.z = 0.0; 
 }
 
-// Stub: Generates synthetic LiDAR data (10Hz)
+// Blocking Servo Sweep and Scan
 void readLiDAR(double t) {
     scan_msg.header.stamp.sec = (int)t;
     scan_msg.header.stamp.nanosec = (uint32_t)((t - (int)t) * 1e9);
     
-    scan_msg.angle_min = -3.14;
-    scan_msg.angle_max = 3.14;
-    scan_msg.angle_increment = 6.28 / 360.0;
-    scan_msg.range_min = 0.15;
-    scan_msg.range_max = 12.0;
-
-    for (int i=0; i<360; i++) {
-        scan_msg.ranges.data[i] = 2.0;
+    // Servo Scan Params (180 degrees)
+    scan_msg.angle_min = -1.57; // -90 deg
+    scan_msg.angle_max = 1.57;  // +90 deg
+    scan_msg.angle_increment = 3.14 / 180.0; // 1 deg step
+    scan_msg.range_min = 0.05;
+    scan_msg.range_max = 2.0; // VL53L0X limit approx 2m
+    
+    // Blocking Sweep
+    int data_idx = 0;
+    for (int pos = 0; pos <= 180; pos++) {
+        servo.write(pos);
+        delay(15); // Wait for servo to move
+        
+        uint16_t range_mm = sensor.readRangeSingleMillimeters();
+        if (sensor.timeoutOccurred()) { 
+             scan_msg.ranges.data[data_idx] = 0.0;
+        } else {
+             // Convert to meters
+             float range_m = range_mm / 1000.0;
+             if (range_m > 2.0) range_m = 0.0; // Filter invalid
+             scan_msg.ranges.data[data_idx] = range_m;
+        }
+        data_idx++;
+        if (data_idx >= 360) break; // Safety
     }
-// Navigation Callback
+    
+    // Reset servo slowly or quickly? Quickly for now, to be ready for next logic (or just stay there)
+    // Actually, maybe better to sweep back? For now, we jump back to 0 next time.
+    servo.write(0); 
+}
+
 void cmd_vel_callback(const void * msin) {
     const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msin;
     last_cmd_time = millis();
@@ -96,19 +131,15 @@ void cmd_vel_callback(const void * msin) {
     float linear_x = msg->linear.x;
     float angular_z = msg->angular.z;
 
-    // Simple Differential Drive Kinematics
-    // Assuming max linear speed 0.5 m/s and max angular speed 1.0 rad/s
-    float left_v = linear_x - angular_z * 0.15; // Placeholder track width 0.15m
+    float left_v = linear_x - angular_z * 0.15; 
     float right_v = linear_x + angular_z * 0.15;
 
-    // Map to PWM (-255 to 255)
-    int left_pwm = (int)(left_v * 510);   // 0.5 m/s -> 255
+    int left_pwm = (int)(left_v * 510);   
     int right_pwm = (int)(right_v * 510);
 
     motor.drive(left_pwm, right_pwm);
 }
 
-// IMU Callback (100Hz)
 void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     RCLC_UNUSED(last_call_time);
     RCLC_UNUSED(timer);
@@ -119,7 +150,6 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     ekf.predict(current_imu, now_sec);
 }
 
-// Publisher Callback (10Hz)
 void pub_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     RCLC_UNUSED(last_call_time);
     RCLC_UNUSED(timer);
@@ -127,6 +157,8 @@ void pub_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     double now_sec = millis() / 1000.0;
 
     readEncoders(now_sec);
+    
+    // NOTE: This IS blocking!
     readLiDAR(now_sec);
 
     ekf.update(current_encoder_odom);
@@ -141,12 +173,31 @@ void pub_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
 
 void setup() {
     Serial.begin(115200);
+    Wire.begin(21, 22);
+
+    // Init Sensors
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip");
+        while (1) { delay(10); }
+    }
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+    sensor.setTimeout(500);
+    if (!sensor.init()) {
+        Serial.println("Failed to detect and initialize VL53L0X!");
+        while (1) {}
+    }
     
+    servo.attach(13);
+    servo.write(0); // Home position
+
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6); 
     ekf.init(millis()/1000.0, x0);
 
     scan_msg.ranges.data = scan_ranges;
-    scan_msg.ranges.size = 360;
+    scan_msg.ranges.size = 181; // 0 to 180 degrees
     scan_msg.ranges.capacity = 360;
     
     static char scan_frame_id[] = "laser_link";
@@ -194,10 +245,11 @@ void setup() {
         RCL_MS_TO_NS(10), // 100Hz
         imu_timer_callback));
 
+    // Increase pub timer to 2s to allow for blocking scan
     RCCHECK(rclc_timer_init_default(
         &pub_timer,
         &support,
-        RCL_MS_TO_NS(100), // 10Hz
+        RCL_MS_TO_NS(2000), // 0.5Hz (Every 2 seconds)
         pub_timer_callback));
 
     RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
@@ -214,6 +266,7 @@ void loop() {
         motor.stop();
     }
     
-    RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+    // We increase timeout here because of long blocking operations
+    RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
     delay(10);
 }
