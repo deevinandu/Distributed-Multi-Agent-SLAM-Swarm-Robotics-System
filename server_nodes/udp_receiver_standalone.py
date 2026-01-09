@@ -56,7 +56,11 @@ def main():
             valid_ranges = [r for r in ranges if r > 0.01]
             avg_range = sum(valid_ranges) / len(valid_ranges) if valid_ranges else 0
             
-            print(f"Agent {agent_id} | Pos: ({odom_x:+.3f}, {odom_y:+.3f}) | Yaw: {odom_yaw:+.2f} rad | Avg Range: {avg_range:.2f}m")
+            # Convert yaw to degrees
+            import math
+            yaw_deg = math.degrees(odom_yaw)
+            
+            print(f"Agent {agent_id} | Pos: ({odom_x:+.3f}, {odom_y:+.3f}) | Yaw: {yaw_deg:+.1f}° | Avg Range: {avg_range:.2f}m")
 
         except KeyboardInterrupt:
             print("\n[EXIT] Shutting down...")

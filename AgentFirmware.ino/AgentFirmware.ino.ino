@@ -10,7 +10,6 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-// #include <VL53L0X.h> // Disabled for Simulation
 
 // Constants
 #define WIFI_SSID "ONEPLUS_7T"
@@ -18,18 +17,24 @@
 #define AGENT_ID 1 
 
 // --- NETWORK CONFIG ---
-// Use BROADCAST (255.255.255.255) to reach any laptop on the subnet
-// Checks firewall rules if not receiving!
 const char* agent_ip = "10.132.45.255";
 const int agent_port = 8888;
 const int local_port = 8888;
 
-// --- SERVO CONFIG (LEDC Core v3.0+) ---
+// --- SERVO CONFIG (14-bit resolution for precision) ---
 #define SERVO_PIN 13
-#define SERVO_FREQ 50      
-#define SERVO_RES 16       
-#define MIN_PULSE_US 500   
-#define MAX_PULSE_US 2500  
+#define SERVO_FREQ 50       // 50Hz for servos
+#define SERVO_RES 14        // 14-bit resolution (0-16383)
+// 0 deg   = 0.5ms pulse -> (0.5 / 20) * 16383 ≈ 410
+// 180 deg = 2.4ms pulse -> (2.4 / 20) * 16383 ≈ 1966
+const int minDuty = 410;  
+const int maxDuty = 1966;
+const int stepDelay = 20; // Servo step delay (ms)
+
+// --- ULTRASONIC SENSOR (HC-SR04) ---
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+#define SOUND_SPEED 0.0343  // cm/microsecond
 
 // --- QUASAR-LITE PROTOCOL ---
 struct __attribute__((packed)) QuasarPacket {
@@ -55,7 +60,6 @@ EKF ekf;
 
 // Sensors
 Adafruit_MPU6050 mpu;
-// VL53L0X sensor; // Simulated
 
 // Data Holders
 sensor_msgs__msg__Imu current_imu;
@@ -67,17 +71,44 @@ unsigned long last_pub_time = 0;
 unsigned long last_cmd_time = 0;
 const long CMD_TIMEOUT = 500; 
 const long IMU_INTERVAL = 10; // 100Hz
-const long PUB_INTERVAL = 2000; // 2 Seconds
+const long PUB_INTERVAL = 5000; // 5 Seconds (increased for ultrasonic sweep)
 
-// --- SERVO HELPER ---
+// --- SERVO HELPER (14-bit) ---
 void setServoAngle(int angle) {
     if (angle < 0) angle = 0;
     if (angle > 180) angle = 180;
     
-    long pulse_us = map(angle, 0, 180, MIN_PULSE_US, MAX_PULSE_US);
-    long duty = (pulse_us * 65536L) / 20000L;
+    int dutyCycle = map(angle, 0, 180, minDuty, maxDuty);
+    ledcWrite(SERVO_PIN, dutyCycle);
+}
+
+// --- ULTRASONIC HELPER ---
+float readUltrasonic() {
+    // Clear trigger
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
     
-    ledcWrite(SERVO_PIN, duty);
+    // Send 10us pulse
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    
+    // Measure echo (timeout after 30ms = ~5m max range)
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    
+    if (duration == 0) {
+        return 0.0; // No echo (out of range)
+    }
+    
+    // Calculate distance in METERS
+    float distanceCm = duration * SOUND_SPEED / 2.0;
+    float distanceM = distanceCm / 100.0;
+    
+    // Clamp to reasonable range (0.02m - 4m)
+    if (distanceM > 4.0) distanceM = 0.0;
+    if (distanceM < 0.02) distanceM = 0.0;
+    
+    return distanceM;
 }
 
 void readIMU(double t) {
@@ -95,21 +126,30 @@ void readEncoders(double t) {
     current_encoder_odom.twist.twist.angular.z = 0.0; 
 }
 
-// SIMULATED SCAN
+// REAL ULTRASONIC SCAN
 void performScan(QuasarPacket& packet) {
     packet.scan_count = 181;
     
-    // Simulate Sweep
-    for (int pos = 0; pos <= 180; pos++) {
-        setServoAngle(pos);
-        delay(15); 
+    Serial.println("Starting scan...");
+    
+    // Sweep from 0 to 180 degrees
+    for (int angle = 0; angle <= 180; angle++) {
+        setServoAngle(angle);
+        delay(stepDelay); // Wait for servo to settle
         
-        // --- SIMULATION LOGIC ---
-        // Generate random distance between 0.5m and 1.5m
-        float random_dist = 0.5 + ((float)random(0, 1000) / 1000.0); 
-        packet.ranges[pos] = random_dist;
+        // Read REAL ultrasonic distance
+        float distance = readUltrasonic();
+        packet.ranges[angle] = distance;
+        
+        // Debug output every 30 degrees
+        if (angle % 30 == 0) {
+            Serial.printf("Angle %d: %.2f m\n", angle, distance);
+        }
     }
-    setServoAngle(0); 
+    
+    // Return to home position
+    setServoAngle(0);
+    Serial.println("Scan complete!");
 }
 
 void setup() {
@@ -120,17 +160,24 @@ void setup() {
     if (!mpu.begin()) {
         Serial.println("Failed to find MPU6050 chip");
     } else {
+        Serial.println("MPU6050 initialized");
         mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
         mpu.setGyroRange(MPU6050_RANGE_500_DEG);
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
     }
     
-    // Init Servo (LEDC)
+    // Init Servo (14-bit LEDC)
     if(!ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES)) {
         Serial.println("LEDC Attach FAILED!");
     } else {
         setServoAngle(0);
+        Serial.println("Servo initialized");
     }
+    
+    // Init Ultrasonic
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    Serial.println("Ultrasonic initialized");
 
     Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6); 
     ekf.init(millis()/1000.0, x0);
@@ -203,14 +250,12 @@ void loop() {
 
         performScan(packet);
 
-        // BRODCAST UDP
-        // WARNING: Some routers block broadcast. If fails, use specific IP.
+        // BROADCAST UDP
         IPAddress broadcastIp;
         if(broadcastIp.fromString(agent_ip)) {
              udp.beginPacket(broadcastIp, agent_port);
         } else {
-             // Fallback for .255 if string parsing fails
-             udp.beginPacket("192.168.1.255", agent_port);
+             udp.beginPacket("10.132.45.255", agent_port);
         }
         
         udp.write((const uint8_t*)&packet, sizeof(packet));
