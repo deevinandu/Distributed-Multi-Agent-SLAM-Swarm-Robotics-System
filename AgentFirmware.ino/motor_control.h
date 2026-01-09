@@ -23,9 +23,10 @@ private:
     const int IN2 = 25;
 
     // Right Motor Pins
-    const int ENB = 26;
-    const int IN3 = 27;
-    const int IN4 = 14;
+    // Right Motor Pins
+    const int ENB = 14; // Corrected from 26
+    const int IN3 = 27; // Swapped from 26
+    const int IN4 = 26; // Swapped from 27
 
     // PWM Settings
     const int freq = 5000;
