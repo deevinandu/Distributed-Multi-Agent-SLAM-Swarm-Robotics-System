@@ -7,6 +7,7 @@
 
 #include "ekf.h"
 #include "motor_control.h"
+#include <esp_now.h> // New for Swarm Networking
 
 // ================= CONFIGURATION =================
 #define WIFI_SSID "Gia"
@@ -51,6 +52,7 @@ struct __attribute__((packed)) QuasarPacket {
     float odom_y;
     float odom_yaw;
     int32_t encoder_total;
+    uint32_t v2v_count; // New: Monitor wireless transfers
     uint16_t scan_count;
     float ranges[181];
 };
@@ -82,6 +84,22 @@ float accX_offset = 0.0;
 unsigned long last_imu_time = 0;
 unsigned long startup_time = 0;
 
+// V2V Swarm Communication
+volatile float last_v2v_distance = 4.0;
+unsigned long last_v2v_time = 0;
+volatile uint32_t v2v_packet_received_total = 0;
+
+typedef struct struct_message {
+    float distance;
+} struct_message;
+
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    struct_message* received = (struct_message*)incomingData;
+    last_v2v_distance = received->distance;
+    last_v2v_time = millis();
+    v2v_packet_received_total++;
+}
+
 // ================= INTERRUPTS =================
 void IRAM_ATTR encoderISR() {
     encoder_count++;
@@ -97,31 +115,11 @@ void setServoAngle(int angle) {
 }
 
 float readUltrasonicSingle() {
-    // 1. Force a "Clean State" for the sonar trigger
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(5);
-    
-    // 2. High-Precision Triggering
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(15); // Increased to 15us for better hardware sensitivity 
-    digitalWrite(TRIG_PIN, LOW);
-    
-    // 3. CRITICAL SECTION: Stop background tasks/WiFi from interrupting the timer
-    noInterrupts();
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout (approx 5 meters)
-    interrupts();
-    
-    // 4. Handle failure (TIMEOUT)
-    if (duration == 0) {
-        // [DEBUG] If you see this often, it's a Power/Wiring issue
-        return 4.0; 
+    // V2V LINK: We now read the wireless value instead of local pins
+    if (millis() - last_v2v_time > 1000) {
+        return 4.0; // Fail-safe: sensor node offline
     }
-    
-    // Distance = Time * Speed / 2 (result in METERS)
-    float dist = (duration * SOUND_SPEED / 2.0) / 100.0;
-    
-    // Keep it within sensor logic bounds [2cm - 400cm]
-    return (dist > 4.0) ? 4.0 : ((dist < 0.02) ? 0.02 : dist);
+    return last_v2v_distance;
 }
 
 float readUltrasonic() {
@@ -201,6 +199,7 @@ void sendPacket(QuasarPacket& packet) {
     packet.odom_y = robot_y; 
     packet.odom_yaw = robot_yaw;
     packet.encoder_total = global_encoder_total;
+    packet.v2v_count = v2v_packet_received_total; // Send swarm status to laptop
     
     IPAddress bIp; bIp.fromString(agent_ip);
     udp.beginPacket(bIp, agent_port);
@@ -346,6 +345,12 @@ void setup() {
     
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\n[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        
+        // --- Init ESP-NOW for Swarm V2V ---
+        if (esp_now_init() == ESP_OK) {
+            Serial.println("[SWARM] V2V Link Initialized.");
+            esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
+        }
     } else {
         Serial.println("\n[WIFI] FAILED to connect (Timeout 10s). Proceeding offline.");
     }

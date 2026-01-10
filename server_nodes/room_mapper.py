@@ -17,10 +17,8 @@ try:
 except:
     pass
 
-# Configuration
-UDP_PORT = 8888
-# QSRL (4s), AgentID (B), X/Y/Yaw (3f), Encoder (i), ScanCount (H), Ranges (181f)
-PACKET_FMT = '<4sBfffiH181f'
+# QSRL (4s), AgentID (B), X/Y/Yaw (3f), Encoder (i), V2V_Count (I), ScanCount (H), Ranges (181f)
+PACKET_FMT = '<4sBfffiIH181f'
 PACKET_SIZE = struct.calcsize(PACKET_FMT)
 
 def main():
@@ -91,7 +89,8 @@ def main():
                 odom_y = unpacked[3]
                 odom_yaw = unpacked[4]
                 encoder_total = unpacked[5]
-                ranges = list(unpacked[7:])
+                v2v_count = unpacked[6]
+                ranges = list(unpacked[8:])
 
                 # Convert readings to NaN if they are outside the 1.2m trust zone
                 # (Robot still uses them to drive, but we don't 'ink' them on the map)
@@ -105,12 +104,12 @@ def main():
                 valid_ranges = [r for r in ranges_clean if not np.isnan(r)]
                 points.set_offsets(np.column_stack([valid_angles, valid_ranges]))
 
-                ax.set_title(f"Map | Yaw: {math.degrees(odom_yaw):.1f}° | Encoder: {encoder_total}", fontsize=14)
+                ax.set_title(f"Map | Yaw: {math.degrees(odom_yaw):.1f}° | Swarm Link: {v2v_count}", fontsize=14)
                 
                 fig.canvas.draw()
                 fig.canvas.flush_events()
                 
-                print(f"Agent {agent_id} | Yaw: {math.degrees(odom_yaw):.1f}° | Enc: {encoder_total} | Points: {len(valid_ranges)}")
+                print(f"Agent {agent_id} | Link: {v2v_count} | Enc: {encoder_total} | Points: {len(valid_ranges)}")
 
             except BlockingIOError:
                 plt.pause(0.01)  # Small pause when no data

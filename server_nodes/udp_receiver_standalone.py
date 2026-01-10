@@ -11,8 +11,8 @@ import math
 
 # Configuration
 UDP_PORT = 8888
-# QSRL (4s), AgentID (B), X/Y/Yaw (3f), Encoder (i), ScanCount (H), Ranges (181f)
-PACKET_FMT = '<4sBfffiH181f'
+# QSRL (4s), AgentID (B), X/Y/Yaw (3f), Encoder (i), V2V_Count (I), ScanCount (H), Ranges (181f)
+PACKET_FMT = '<4sBfffiIH181f'
 PACKET_SIZE = struct.calcsize(PACKET_FMT)
 
 def main():
@@ -50,8 +50,9 @@ def main():
             odom_y = unpacked[3]
             odom_yaw = unpacked[4]
             encoder_total = unpacked[5]
-            scan_count = unpacked[6]
-            ranges = unpacked[7:]
+            v2v_count = unpacked[6]
+            scan_count = unpacked[7]
+            ranges = unpacked[8:]
 
             # Track new agents
             if agent_id not in clients:
@@ -63,7 +64,7 @@ def main():
             avg_range = sum(valid_ranges) / len(valid_ranges) if valid_ranges else 0
             yaw_deg = math.degrees(odom_yaw)
             
-            print(f"Agent {agent_id} | Yaw: {yaw_deg:+.1f}° | Enc: {encoder_total} | Pos: ({odom_x:+.2f}, {odom_y:+.2f})")
+            print(f"Agent {agent_id} | Link: {v2v_count} | Enc: {encoder_total} | Yaw: {yaw_deg:+.1f}°")
 
             # --- SAVE TO CSV ---
             if not os.path.exists('logs'): os.makedirs('logs')
@@ -73,12 +74,12 @@ def main():
             with open(log_file, 'a', newline='') as f:
                 writer = csv.writer(f)
                 if not file_exists:
-                    # Write Header - Added 'encoder' field
-                    header = ['timestamp', 'idx', 'x', 'y', 'yaw', 'encoder'] + [f'r_{i}' for i in range(181)]
+                    # Write Header - Added 'v2v_count'
+                    header = ['timestamp', 'idx', 'x', 'y', 'yaw', 'encoder', 'v2v_link'] + [f'r_{i}' for i in range(181)]
                     writer.writerow(header)
                 
                 # Write Data Row
-                row = [time.time(), len(valid_ranges), odom_x, odom_y, odom_yaw, encoder_total] + list(ranges)
+                row = [time.time(), len(valid_ranges), odom_x, odom_y, odom_yaw, encoder_total, v2v_count] + list(ranges)
                 writer.writerow(row)
 
         except KeyboardInterrupt:
