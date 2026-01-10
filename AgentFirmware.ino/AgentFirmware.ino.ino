@@ -127,8 +127,8 @@ void readIMU() {
     sensors_event_t a, g, temp;
     if (mpu.getEvent(&a, &g, &temp)) {
         current_imu.angular_velocity.z = g.gyro.z - gyroZ_offset;
-        // Orientation correction: Forward = -X (determined in test)
-        current_imu.linear_acceleration.x = -(a.acceleration.x - accX_offset);
+        // Orientation correction: New Forward is now +X
+        current_imu.linear_acceleration.x = (a.acceleration.x - accX_offset);
     }
 }
 

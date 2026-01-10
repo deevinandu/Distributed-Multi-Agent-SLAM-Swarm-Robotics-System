@@ -1,4 +1,10 @@
 import pandas as pd
+import matplotlib
+# Try to force a standard backend for Windows
+try:
+    matplotlib.use('TkAgg')
+except:
+    pass
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -9,10 +15,22 @@ def draw_topdown_map(file_path):
         print(f"[ERROR] File not found: {file_path}")
         return
 
-    df = pd.read_csv(file_path)
-    print(f"Mapping {len(df)} frames from {file_path}...")
+    print(f"Loading data from {file_path}...")
+    try:
+        df = pd.read_csv(file_path)
+    except Exception as e:
+        print(f"[ERROR] Could not read CSV: {e}")
+        return
+        
+    print(f"Mapping {len(df)} frames...")
+    print(f"[INFO] Backend being used: {matplotlib.get_backend()}")
+    print("[INFO] Attempting to open window...")
 
-    plt.figure(figsize=(10, 10))
+    try:
+        plt.figure(figsize=(10, 10))
+    except Exception as e:
+        print(f"[ERROR] Could not create plot window: {e}")
+        return
     
     # Store all "hits" (X, Y coordinates of detected walls)
     all_x = []
@@ -29,7 +47,8 @@ def draw_topdown_map(file_path):
         # Convert each scan point to world X, Y
         for i in range(181):
             dist = row[f'r_{i}']
-            if 0.1 < dist < 3.9: # Filter out noise and max range
+            # TRUST FILTER: Only use values <= 1.2m for mapping walls
+            if 0.1 < dist <= 1.2: 
                 # World Angle = Robot Yaw + Scan Angle (-90 to +90)
                 angle_rad = ryaw + math.radians(i - 90)
                 

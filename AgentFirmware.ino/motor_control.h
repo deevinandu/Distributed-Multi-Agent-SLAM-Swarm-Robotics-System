@@ -17,16 +17,15 @@ public:
     void stop();
 
 private:
-    // Left Motor Pins
-    const int ENA = 32;
-    const int IN1 = 33;
-    const int IN2 = 25;
+    // Left Motor Pins (Swapped with Right)
+    const int ENA = 14;
+    const int IN1 = 27;
+    const int IN2 = 26;
 
-    // Right Motor Pins
-    // Right Motor Pins
-    const int ENB = 14; // Corrected from 26
-    const int IN3 = 27; // Swapped from 26
-    const int IN4 = 26; // Swapped from 27
+    // Right Motor Pins (Swapped with Left)
+    const int ENB = 32;
+    const int IN3 = 33;
+    const int IN4 = 25;
 
     // PWM Settings
     const int freq = 5000;

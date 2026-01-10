@@ -28,11 +28,11 @@ void MotorController::stop() {
 
 void MotorController::setMotor(int speed, int ena_pin, int in1_pin, int in2_pin) {
     if (speed > 0) {
-        digitalWrite(in1_pin, LOW);
-        digitalWrite(in2_pin, HIGH);
-    } else if (speed < 0) {
         digitalWrite(in1_pin, HIGH);
         digitalWrite(in2_pin, LOW);
+    } else if (speed < 0) {
+        digitalWrite(in1_pin, LOW);
+        digitalWrite(in2_pin, HIGH);
     } else {
         digitalWrite(in1_pin, LOW);
         digitalWrite(in2_pin, LOW);

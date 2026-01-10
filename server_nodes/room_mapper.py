@@ -79,8 +79,9 @@ def main():
                 odom_yaw = unpacked[4]
                 ranges = list(unpacked[6:])
 
-                # Convert 0 readings to NaN (won't plot)
-                ranges_clean = [r if r > 0.01 else np.nan for r in ranges]
+                # Convert readings to NaN if they are outside the 1.2m trust zone
+                # (Robot still uses them to drive, but we don't 'ink' them on the map)
+                ranges_clean = [r if 0.01 < r <= 1.2 else np.nan for r in ranges]
 
                 # Update plot
                 line.set_ydata(ranges_clean)
