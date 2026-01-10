@@ -268,35 +268,37 @@ void navigate() {
     // 1. Initial State: If obstructed, scan and turn
     float d_now = readUltrasonicSingle();
     if (d_now <= OBSTACLE_THRESHOLD) {
-        Serial.println("[NAV] Path blocked. Planning move...");
+        Serial.println("[NAV] Path blocked. Scanning...");
         
         QuasarPacket p; performMissionScan(p); sendPacket(p);
         
-        // Find Max Clearance Vector
-        int best_bucket = 9;
-        float max_clearance = 0;
-        for(int i=0; i<18; i++) {
-            if(bucket_distances[i] > max_clearance) {
-                max_clearance = bucket_distances[i];
-                best_bucket = i;
-            }
-        }
+        // Calculate Left and Right average distances
+        // Left = buckets 0-8 (0-90 degrees), Right = buckets 9-17 (90-180 degrees)
+        float left_avg = 0, right_avg = 0;
+        for(int i=0; i<9; i++) left_avg += bucket_distances[i];
+        for(int i=9; i<18; i++) right_avg += bucket_distances[i];
+        left_avg /= 9.0;
+        right_avg /= 9.0;
         
-        int target_angle = (best_bucket * 10) + 5;
-        int turn_needed = 90 - target_angle;
-        Serial.printf("[NAV] Best Path @ %d deg. Turning %d deg.\n", target_angle, abs(turn_needed));
+        Serial.printf("[NAV] Left: %.2fm | Right: %.2fm\n", left_avg, right_avg);
         
-        if(abs(turn_needed) > 10) {
-            turn(abs(turn_needed), turn_needed > 0);
+        // LEFT-FIRST Priority: If left has >60cm clearance, turn left
+        if(left_avg > 0.60) {
+            Serial.println("[NAV] Turning LEFT 15 deg.");
+            turn(15, true); // true = left
+        } else if(right_avg > 0.60) {
+            Serial.println("[NAV] Turning RIGHT 15 deg.");
+            turn(15, false); // false = right
         } else {
-            // Path is clear or almost forward
-            moveForwardReactive();
+            // Both sides blocked -> Turn 90 degrees to the more open side
+            Serial.println("[NAV] Tight spot! Full turn.");
+            turn(90, left_avg > right_avg);
         }
     } else {
         // 2. Path is clear -> Drive until 25cm
         moveForwardReactive();
         
-        // 3. Just reached 25cm? Scan now to map the wall we found
+        // 3. Scan to map the wall we found
         Serial.println("[NAV] At 25cm. Mapping wall...");
         QuasarPacket p; performMissionScan(p); sendPacket(p);
     }
