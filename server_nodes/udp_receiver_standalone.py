@@ -62,6 +62,23 @@ def main():
             
             print(f"Agent {agent_id} | Pos: ({odom_x:+.3f}, {odom_y:+.3f}) | Yaw: {yaw_deg:+.1f}° | Avg Range: {avg_range:.2f}m")
 
+            # --- NEW: SAVE TO CSV ---
+            import os, csv, time
+            if not os.path.exists('logs'): os.makedirs('logs')
+            log_file = f"logs/agent_{agent_id}_log.csv"
+            file_exists = os.path.isfile(log_file)
+            
+            with open(log_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    # Write Header
+                    header = ['timestamp', 'idx', 'x', 'y', 'yaw'] + [f'r_{i}' for i in range(181)]
+                    writer.writerow(header)
+                
+                # Write Data Row
+                row = [time.time(), len(valid_ranges), odom_x, odom_y, odom_yaw] + list(ranges)
+                writer.writerow(row)
+
         except KeyboardInterrupt:
             print("\n[EXIT] Shutting down...")
             break

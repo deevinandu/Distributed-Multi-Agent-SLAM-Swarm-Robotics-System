@@ -14,7 +14,7 @@
 #define AGENT_ID 1 
 
 // Network
-const char* agent_ip = "10.132.45.255";
+const char* agent_ip = "10.57.0.255"; // Broadcast address for your subnet
 const int agent_port = 8888;
 const int local_port = 8888;
 
@@ -39,8 +39,8 @@ const float CM_PER_GROOVE = 30.0 / 28.0;
 const float OBSTACLE_THRESHOLD = 0.40;  // 40cm
 const float SAFE_DISTANCE = 0.60;       // 60cm
 const float MOVE_DISTANCE_CM = 20.0;    
-const int MOTOR_SPEED = 250;            // High torque
-const int TURN_SPEED = 240;
+const int MOTOR_SPEED = 190;            // High torque
+const int TURN_SPEED = 180;
 const int STARTUP_DELAY_SEC = 5;
 
 // ================= PROTOCOL =================
@@ -106,9 +106,13 @@ float readUltrasonicSingle() {
 }
 
 float readUltrasonic() {
-    const int N = 10;
+    const int N = 10; // Restored for high accuracy
     float s[N];
-    for(int i=0; i<N; i++) { s[i] = readUltrasonicSingle(); delay(5); }
+    for(int i=0; i<N; i++) { 
+        s[i] = readUltrasonicSingle(); 
+        delay(5); 
+    }
+    // Outlier-removal filter
     for(int i=0; i<N-1; i++) {
         for(int j=0; j<N-i-1; j++) {
             if(s[j] > s[j+1]) { float t=s[j]; s[j]=s[j+1]; s[j+1]=t; }
@@ -133,16 +137,32 @@ void performMissionScan(QuasarPacket& packet) {
     packet.scan_count = 181;
     for(int i=0; i<181; i++) packet.ranges[i] = 0.0;
     
-    // Pattern: 90->0->180->90
-    for(int a=90; a>=0; a-=2) { setServoAngle(a); delay(stepDelay); }
-    Serial.println("[SCAN] Capturing 0 to 180...");
-    for(int a=0; a<=180; a+=2) {
-        setServoAngle(a); delay(stepDelay);
-        float d = readUltrasonic();
-        packet.ranges[a] = d;
-        if(a+1 <= 180) packet.ranges[a+1] = d;
+    // Pattern: 90 -> 0 (5 Seconds)
+    Serial.println("[SCAN] Sweeping 90 -> 0 (5s)...");
+    for(int a=90; a>=0; a--) { 
+        setServoAngle(a); 
+        delay(55); // 5000ms / 90 steps
+        if (a % 45 == 0) Serial.printf("  Current: %d\n", a);
     }
-    for(int a=180; a>=90; a-=2) { setServoAngle(a); delay(stepDelay); }
+    
+    // Pattern: 0 -> 180 (10s + Capture)
+    Serial.println("[SCAN] Capturing 0 to 180...");
+    for(int a=0; a<=180; a++) {
+        setServoAngle(a); 
+        delay(55);
+        
+        if (a % 2 == 0) {
+            float d = readUltrasonic();
+            packet.ranges[a] = d;
+            if (a+1 <= 180) packet.ranges[a+1] = d;
+        }
+    }
+
+    Serial.println("[SCAN] Returning 180 -> 90 (5s)...");
+    for(int a=180; a>=90; a--) { 
+        setServoAngle(a); 
+        delay(55); 
+    }
 
     // Zone derivation
     float sums[5]={0}, counts[5]={0};
@@ -215,26 +235,75 @@ void navigate() {
 // ================= CORE =================
 void setup() {
     Serial.begin(115200); 
+    delay(1000); // Give Serial monitor time to connect
+    
+    Serial.println("\n[BOOT] System Starting...");
+    
+    Serial.println("[BOOT] Initializing I2C (Pins 21, 22)...");
     Wire.begin(21, 22);
-    mpu.begin();
-    // Calibrate GYRO for 2 seconds
-    float gz_sum = 0, ax_sum = 0; int samples = 100;
-    for(int i=0; i<samples; i++) {
-        sensors_event_t a, g, t; mpu.getEvent(&a,&g,&t);
-        gz_sum += g.gyro.z; ax_sum += a.acceleration.x; delay(20);
+    Wire.setClock(100000); // Standard speed to be safe
+    
+    Serial.println("[BOOT] Initializing MPU6050...");
+    if (!mpu.begin()) {
+        Serial.println("[ERROR] MPU6050 not found! Hanging for safety.");
+        while(1) { delay(1000); }
     }
-    gyroZ_offset = gz_sum / samples; accX_offset = ax_sum / samples;
+    Serial.println("[BOOT] MPU6050 OK. Calibrating...");
     
-    ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES); setServoAngle(90);
+    // Calibrate GYRO and ACCEL
+    float gz_sum = 0, ax_sum = 0; int samples = 50;
+    for(int i=0; i<samples; i++) {
+        sensors_event_t a, g, t; 
+        if (mpu.getEvent(&a,&g,&t)) {
+            gz_sum += g.gyro.z; 
+            ax_sum += a.acceleration.x; 
+        }
+        delay(20);
+    }
+    gyroZ_offset = gz_sum / samples; 
+    accX_offset = ax_sum / samples;
+    Serial.println("[BOOT] Calibration Done.");
+    
+    Serial.println("[BOOT] Initializing Encoder...");
+    pinMode(ENCODER_PIN, INPUT); 
+    attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), encoderISR, RISING);
+    
+    Serial.println("[BOOT] Initializing Motors...");
     motor.init();
-    pinMode(TRIG_PIN, OUTPUT); pinMode(ECHO_PIN, INPUT);
-    pinMode(ENCODER_PIN, INPUT); attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), encoderISR, RISING);
     
+    Serial.println("[BOOT] Initializing Servo (RE-ATTEMPT)...");
+    // Ensure servo is attached AFTER motors to avoid timer conflict
+    ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES); 
+    
+    // WIGGLE TEST
+    Serial.println("[BOOT] Servo Wiggle Test...");
+    setServoAngle(45); delay(500);
+    setServoAngle(135); delay(500);
+    setServoAngle(90); delay(500);
+    Serial.println("[BOOT] Servo Wiggle OK.");
+
+    Serial.printf("[WIFI] Connecting to %s...\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while(WiFi.status() != WL_CONNECTED) delay(500);
+    
+    unsigned long start_wifi = millis();
+    while(WiFi.status() != WL_CONNECTED && millis() - start_wifi < 10000) {
+        delay(500);
+        Serial.print(".");
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("\n[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        Serial.println("\n[WIFI] FAILED to connect (Timeout 10s). Proceeding offline.");
+    }
+    
     udp.begin(local_port);
     
-    Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6); ekf.init(millis()/1000.0, x0);
+    Serial.println("[BOOT] Initializing EKF...");
+    Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6); 
+    ekf.init(millis()/1000.0, x0);
+    
+    Serial.println("[BOOT] SETUP COMPLETE. Robot will move in 5 seconds.");
     startup_time = millis();
 }
 
