@@ -9,12 +9,12 @@
 #include "motor_control.h"
 
 // ================= CONFIGURATION =================
-#define WIFI_SSID "ONEPLUS_7T"
-#define WIFI_PASSWORD "dvhy03555"
+#define WIFI_SSID "Gia"
+#define WIFI_PASSWORD "e7jt92zp"
 #define AGENT_ID 1 
 
 // Network
-const char* agent_ip = "10.57.0.255"; // Broadcast address for your subnet
+const char* agent_ip = "172.25.35.255"; // Broadcast address for your new subnet
 const int agent_port = 8888;
 const int local_port = 8888;
 
@@ -50,6 +50,7 @@ struct __attribute__((packed)) QuasarPacket {
     float odom_x;
     float odom_y;
     float odom_yaw;
+    int32_t encoder_total;
     uint16_t scan_count;
     float ranges[181];
 };
@@ -63,6 +64,7 @@ EKF ekf;
 // State
 sensor_msgs__msg__Imu current_imu;
 volatile long encoder_count = 0;
+volatile int32_t global_encoder_total = 0;
 float zone_distances[5] = {4.0, 4.0, 4.0, 4.0, 4.0};
 
 // Position & Mission
@@ -83,6 +85,7 @@ unsigned long startup_time = 0;
 // ================= INTERRUPTS =================
 void IRAM_ATTR encoderISR() {
     encoder_count++;
+    global_encoder_total++;
 }
 
 // ================= SENSORS =================
@@ -94,14 +97,30 @@ void setServoAngle(int angle) {
 }
 
 float readUltrasonicSingle() {
+    // 1. Force a "Clean State" for the sonar trigger
     digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
+    delayMicroseconds(5);
+    
+    // 2. High-Precision Triggering
     digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
+    delayMicroseconds(15); // Increased to 15us for better hardware sensitivity 
     digitalWrite(TRIG_PIN, LOW);
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    if (duration == 0) return 4.0;
+    
+    // 3. CRITICAL SECTION: Stop background tasks/WiFi from interrupting the timer
+    noInterrupts();
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout (approx 5 meters)
+    interrupts();
+    
+    // 4. Handle failure (TIMEOUT)
+    if (duration == 0) {
+        // [DEBUG] If you see this often, it's a Power/Wiring issue
+        return 4.0; 
+    }
+    
+    // Distance = Time * Speed / 2 (result in METERS)
     float dist = (duration * SOUND_SPEED / 2.0) / 100.0;
+    
+    // Keep it within sensor logic bounds [2cm - 400cm]
     return (dist > 4.0) ? 4.0 : ((dist < 0.02) ? 0.02 : dist);
 }
 
@@ -149,12 +168,13 @@ void performMissionScan(QuasarPacket& packet) {
     Serial.println("[SCAN] Capturing 0 to 180...");
     for(int a=0; a<=180; a++) {
         setServoAngle(a); 
-        delay(55);
+        delay(80); // Settling delay
         
         if (a % 2 == 0) {
             float d = readUltrasonic();
             packet.ranges[a] = d;
             if (a+1 <= 180) packet.ranges[a+1] = d;
+            Serial.printf("[SCAN] %d: %.2fm\n", a, d);
         }
     }
 
@@ -177,7 +197,11 @@ void performMissionScan(QuasarPacket& packet) {
 void sendPacket(QuasarPacket& packet) {
     memcpy(packet.magic, "QSRL", 4);
     packet.agent_id = AGENT_ID;
-    packet.odom_x = robot_x; packet.odom_y = robot_y; packet.odom_yaw = robot_yaw;
+    packet.odom_x = robot_x; 
+    packet.odom_y = robot_y; 
+    packet.odom_yaw = robot_yaw;
+    packet.encoder_total = global_encoder_total;
+    
     IPAddress bIp; bIp.fromString(agent_ip);
     udp.beginPacket(bIp, agent_port);
     udp.write((const uint8_t*)&packet, sizeof(packet));
@@ -191,13 +215,31 @@ bool checkMissionComplete() {
 
 // ================= MOVEMENT =================
 void moveForward(float dist_cm) {
+    if (CM_PER_GROOVE <= 0) return; // Safety check
     int target = (int)(dist_cm / CM_PER_GROOVE);
+    
+    // Atomic Reset
+    noInterrupts();
     encoder_count = 0;
+    interrupts();
+    
     motor.drive(MOTOR_SPEED, MOTOR_SPEED);
-    while(encoder_count < target) {
-        setServoAngle(90);
-        if(readUltrasonic() < OBSTACLE_THRESHOLD) break;
-        delay(50);
+    Serial.printf("[MOVE] Forward %d grooves (%.1f cm)...\n", target, dist_cm);
+    
+    unsigned long start_time = millis();
+    while(encoder_count < target && (millis() - start_time) < 10000) {
+        // Use single reading for low latency during movement
+        float d = readUltrasonicSingle();
+        
+        if (encoder_count % 5 == 0) {
+            Serial.printf("  Progress: %d/%d | Dist: %.2f m\n", encoder_count, target, d);
+        }
+        
+        if(d < OBSTACLE_THRESHOLD) {
+            Serial.println("[HALT] Obstacle!");
+            break;
+        }
+        delay(30); 
     }
     motor.stop();
     float m = (encoder_count * CM_PER_GROOVE) / 100.0;
@@ -209,8 +251,19 @@ void turn(int degrees, bool left) {
     float start_yaw = robot_yaw;
     float target_rad = radians(abs(degrees));
     motor.drive(left ? -TURN_SPEED : TURN_SPEED, left ? TURN_SPEED : -TURN_SPEED);
-    while(abs(robot_yaw - start_yaw) < target_rad) {
+    
+    unsigned long start_time = millis();
+    while(abs(robot_yaw - start_yaw) < target_rad && (millis() - start_time) < 5000) {
         readIMU();
+        // Force EKF update during turn
+        sensor_msgs__msg__Imu msg; 
+        msg.angular_velocity.z = current_imu.angular_velocity.z; 
+        msg.linear_acceleration.x = current_imu.linear_acceleration.x;
+        ekf.predict(msg, millis()/1000.0);
+        nav_msgs__msg__Odometry o = ekf.getOdom();
+        
+        // Correct Yaw Extraction
+        robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w);
         delay(10);
     }
     motor.stop();
@@ -317,7 +370,9 @@ void loop() {
     msg.linear_acceleration.x = current_imu.linear_acceleration.x;
     ekf.predict(msg, now/1000.0);
     nav_msgs__msg__Odometry o = ekf.getOdom();
-    robot_yaw = o.pose.pose.orientation.z; // Simplified for 2D
+    
+    // Correct Yaw Extraction (2 * atan2(z, w))
+    robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w); 
     
     if(now - startup_time > STARTUP_DELAY_SEC * 1000) {
         navigate();

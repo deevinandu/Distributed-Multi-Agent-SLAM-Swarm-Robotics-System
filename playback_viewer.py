@@ -31,26 +31,19 @@ def playback_csv(file_path):
         print("[ERROR] File is empty!")
         return
 
-    print(f"[INFO] Backend being used: {matplotlib.get_backend()}")
-    print("[INFO] Attempting to open window...")
-    
     # Setup Plot
     try:
         plt.ion()
         fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
     except Exception as e:
         print(f"[ERROR] Could not create plot window: {e}")
-        print("Suggestion: Run 'pip install PyQt5' or check your python installation for Tkinter.")
         return
-    ax.set_title(f"Playback: {os.path.basename(file_path)}", fontsize=14)
     ax.set_theta_zero_location('N')
     ax.set_theta_direction(-1)
     ax.set_ylim(0, 4)
 
     angles_deg = np.linspace(-90, 90, 181)
     angles_rad = np.radians(angles_deg)
-    
-    # Extract range columns (r_0 to r_180)
     range_cols = [f'r_{i}' for i in range(181)]
     
     line, = ax.plot(angles_rad, np.zeros(181), 'b-', alpha=0.5)
@@ -60,21 +53,19 @@ def playback_csv(file_path):
     
     for idx, row in df.iterrows():
         ranges = row[range_cols].values
-        # Clean zeros
         ranges_clean = np.where(ranges > 0.01, ranges, np.nan)
         
-        # Update plot
         line.set_ydata(ranges_clean)
-        
         valid_mask = ~np.isnan(ranges_clean)
         points.set_offsets(np.column_stack([angles_rad[valid_mask], ranges_clean[valid_mask]]))
         
-        ax.set_title(f"Frame {idx+1}/{len(df)} | Pos: ({row['x']:.2f}, {row['y']:.2f})", fontsize=12)
+        # Display encoder if available
+        enc_str = f" | Enc: {int(row['encoder'])}" if 'encoder' in row else ""
+        ax.set_title(f"Frame {idx+1}/{len(df)} | Pos: ({row['x']:.2f}, {row['y']:.2f}){enc_str}", fontsize=12)
         
         fig.canvas.draw()
         fig.canvas.flush_events()
-        
-        time.sleep(0.1) # Playback speed
+        time.sleep(0.1)
 
     print("\nPlayback finished. Keeping window open...")
     plt.ioff()
