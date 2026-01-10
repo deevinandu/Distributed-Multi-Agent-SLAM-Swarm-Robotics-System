@@ -37,8 +37,8 @@ const int stepDelay = 30; // 30ms per degree = slow methodical scan
 const float CM_PER_GROOVE = 30.0 / 28.0;
 
 // Navigation Parameters
-const float OBSTACLE_THRESHOLD = 0.40;  // 40cm
-const float SAFE_DISTANCE = 0.60;       // 60cm
+const float OBSTACLE_THRESHOLD = 0.25;  // 25cm
+const float SAFE_DISTANCE = 0.50;       // 50cm
 const float MOVE_DISTANCE_CM = 20.0;    
 const int MOTOR_SPEED = 190;            // High torque
 const int TURN_SPEED = 180;
@@ -206,34 +206,32 @@ bool checkMissionComplete() {
 }
 
 // ================= MOVEMENT =================
-void moveForward(float dist_cm) {
-    if (CM_PER_GROOVE <= 0) return; // Safety check
-    int target = (int)(dist_cm / CM_PER_GROOVE);
-    
-    // Atomic Reset
+void moveForwardReactive() {
+    // Atomic Reset (Not strictly needed for distance, but good for Odom)
     noInterrupts();
     encoder_count = 0;
     interrupts();
     
     motor.drive(MOTOR_SPEED, MOTOR_SPEED);
-    Serial.printf("[MOVE] Forward %d grooves (%.1f cm)...\n", target, dist_cm);
+    Serial.println("[MOVE] Reactive Forward until 25cm...");
     
     unsigned long start_time = millis();
-    while(encoder_count < target && (millis() - start_time) < 10000) {
-        // Use single reading for low latency during movement
+    while((millis() - start_time) < 15000) { // 15s safety timeout
         float d = readUltrasonicSingle();
         
         if (encoder_count % 5 == 0) {
-            Serial.printf("  Progress: %d/%d | Dist: %.2f m\n", encoder_count, target, d);
+            Serial.printf("  Enc: %d | Dist: %.2f m\n", encoder_count, d);
         }
         
         if(d < OBSTACLE_THRESHOLD) {
-            Serial.println("[HALT] Obstacle!");
+            Serial.println("[HALT] 25cm Trigger Reached!");
             break;
         }
         delay(30); 
     }
     motor.stop();
+    
+    // Update Global Pose
     float m = (encoder_count * CM_PER_GROOVE) / 100.0;
     robot_x += m * cos(robot_yaw); robot_y += m * sin(robot_yaw);
     total_distance_traveled += m;
@@ -266,18 +264,17 @@ void navigate() {
         mission_complete = true; Serial.println("MISSION COMPLETE!");
         motor.stop(); return;
     }
-    QuasarPacket p; performMissionScan(p); sendPacket(p);
-    
-    // 1. Check if Forward (Center Buckets 8, 9) is clear
-    float center_dist = (bucket_distances[8] + bucket_distances[9]) / 2.0;
-    
-    if(center_dist > SAFE_DISTANCE) {
-        moveForward(MOVE_DISTANCE_CM);
-    } else {
-        // 2. OBSTACLE DETECTED -> Find Max Clearance Vector
-        int best_bucket = 9; // Default to straight
-        float max_clearance = 0;
+
+    // 1. Initial State: If obstructed, scan and turn
+    float d_now = readUltrasonicSingle();
+    if (d_now <= OBSTACLE_THRESHOLD) {
+        Serial.println("[NAV] Path blocked. Planning move...");
         
+        QuasarPacket p; performMissionScan(p); sendPacket(p);
+        
+        // Find Max Clearance Vector
+        int best_bucket = 9;
+        float max_clearance = 0;
         for(int i=0; i<18; i++) {
             if(bucket_distances[i] > max_clearance) {
                 max_clearance = bucket_distances[i];
@@ -285,18 +282,23 @@ void navigate() {
             }
         }
         
-        // 3. Calculate target angle (0 to 180 degrees)
         int target_angle = (best_bucket * 10) + 5;
-        int turn_needed = 90 - target_angle; // Relative to current forward (90)
+        int turn_needed = 90 - target_angle;
+        Serial.printf("[NAV] Best Path @ %d deg. Turning %d deg.\n", target_angle, abs(turn_needed));
         
-        Serial.printf("[NAV] Obstacle! Max Clearance @ %d deg. Turning %d deg.\n", target_angle, abs(turn_needed));
-        
-        if(abs(turn_needed) > 5) {
-            turn(abs(turn_needed), turn_needed > 0); // true if turn left
+        if(abs(turn_needed) > 10) {
+            turn(abs(turn_needed), turn_needed > 0);
         } else {
-            // If best way is still basically forward but blocked, try small random nudge
-            turn(20, (millis() % 2 == 0));
+            // Path is clear or almost forward
+            moveForwardReactive();
         }
+    } else {
+        // 2. Path is clear -> Drive until 25cm
+        moveForwardReactive();
+        
+        // 3. Just reached 25cm? Scan now to map the wall we found
+        Serial.println("[NAV] At 25cm. Mapping wall...");
+        QuasarPacket p; performMissionScan(p); sendPacket(p);
     }
 }
 
