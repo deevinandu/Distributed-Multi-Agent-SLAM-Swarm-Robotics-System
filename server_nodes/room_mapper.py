@@ -10,12 +10,14 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Configuration
-UDP_PORT = 8888
-PACKET_FMT = '<4sBfffH181f'
-PACKET_SIZE = struct.calcsize(PACKET_FMT)
-
 def main():
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("[ERROR] Missing libraries. Run: pip install matplotlib numpy")
+        return
+
     print("=" * 50)
     print("Room Mapper - Real-time Visualizer")
     print(f"Listening on UDP Port: {UDP_PORT}")
@@ -23,12 +25,22 @@ def main():
 
     # Setup UDP
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('0.0.0.0', UDP_PORT))
+    try:
+        sock.bind(('0.0.0.0', UDP_PORT))
+    except Exception as e:
+        print(f"[ERROR] Could not bind to port {UDP_PORT}: {e}")
+        return
     sock.setblocking(False)
 
+    print("[INFO] Opening Window...")
     # Setup Plot (Polar coordinates)
     plt.ion()  # Interactive mode
-    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
+    try:
+        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
+    except Exception as e:
+        print(f"[ERROR] Matplotlib window failed: {e}")
+        print("Try: pip install PyQt5")
+        return
     ax.set_title("Room Map (Ultrasonic Scan)", fontsize=14)
     ax.set_theta_zero_location('N')  # 0 degrees at top
     ax.set_theta_direction(-1)  # Clockwise
