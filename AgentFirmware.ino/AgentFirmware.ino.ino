@@ -67,7 +67,7 @@ EKF ekf;
 sensor_msgs__msg__Imu current_imu;
 volatile long encoder_count = 0;
 volatile int32_t global_encoder_total = 0;
-float zone_distances[5] = {4.0, 4.0, 4.0, 4.0, 4.0};
+float bucket_distances[18]; // 18 buckets of 10 degrees each
 
 // Position & Mission
 float robot_x = 0.0;
@@ -170,13 +170,18 @@ void performMissionScan(QuasarPacket& packet) {
         delay(55); 
     }
 
-    // Zone derivation
-    float sums[5]={0}, counts[5]={0};
-    for(int i=0; i<=180; i+=2) {
-        int z = i/36; if(z>4) z=4;
-        sums[z] += packet.ranges[i]; counts[z]++;
+    // Bucket derivation (18 buckets, 10 degrees each)
+    for(int b=0; b<18; b++) {
+        float sum = 0;
+        int count = 0;
+        for(int i=b*10; i<(b+1)*10 && i<=180; i+=2) {
+            if(packet.ranges[i] > 0.01) {
+                sum += packet.ranges[i];
+                count++;
+            }
+        }
+        bucket_distances[b] = (count > 0) ? (sum / count) : 4.0;
     }
-    for(int i=0; i<5; i++) zone_distances[i] = (counts[i]>0) ? (sums[i]/counts[i]) : 4.0;
 }
 
 // ================= MISSION LOGIC =================
@@ -263,13 +268,36 @@ void navigate() {
     }
     QuasarPacket p; performMissionScan(p); sendPacket(p);
     
-    if(zone_distances[2] > SAFE_DISTANCE && zone_distances[1] > OBSTACLE_THRESHOLD && zone_distances[3] > OBSTACLE_THRESHOLD) {
+    // 1. Check if Forward (Center Buckets 8, 9) is clear
+    float center_dist = (bucket_distances[8] + bucket_distances[9]) / 2.0;
+    
+    if(center_dist > SAFE_DISTANCE) {
         moveForward(MOVE_DISTANCE_CM);
-    } else if(zone_distances[2] < OBSTACLE_THRESHOLD) {
-        if(zone_distances[0] > zone_distances[4]) turn(45, true); else turn(45, false);
-    } else if(zone_distances[1] < OBSTACLE_THRESHOLD) turn(30, false);
-    else if(zone_distances[3] < OBSTACLE_THRESHOLD) turn(30, true);
-    else moveForward(MOVE_DISTANCE_CM / 2.0);
+    } else {
+        // 2. OBSTACLE DETECTED -> Find Max Clearance Vector
+        int best_bucket = 9; // Default to straight
+        float max_clearance = 0;
+        
+        for(int i=0; i<18; i++) {
+            if(bucket_distances[i] > max_clearance) {
+                max_clearance = bucket_distances[i];
+                best_bucket = i;
+            }
+        }
+        
+        // 3. Calculate target angle (0 to 180 degrees)
+        int target_angle = (best_bucket * 10) + 5;
+        int turn_needed = 90 - target_angle; // Relative to current forward (90)
+        
+        Serial.printf("[NAV] Obstacle! Max Clearance @ %d deg. Turning %d deg.\n", target_angle, abs(turn_needed));
+        
+        if(abs(turn_needed) > 5) {
+            turn(abs(turn_needed), turn_needed > 0); // true if turn left
+        } else {
+            // If best way is still basically forward but blocked, try small random nudge
+            turn(20, (millis() % 2 == 0));
+        }
+    }
 }
 
 // ================= CORE =================
