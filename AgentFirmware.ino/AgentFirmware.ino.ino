@@ -85,17 +85,17 @@ unsigned long last_imu_time = 0;
 unsigned long startup_time = 0;
 
 // V2V Swarm Communication
-volatile float last_v2v_distance = 4.0;
+volatile float last_v2v_distance_cm = 400.0;
 unsigned long last_v2v_time = 0;
 volatile uint32_t v2v_packet_received_total = 0;
 
 typedef struct struct_message {
-    float distance;
+    float distance; // Now receiving in CM
 } struct_message;
 
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     struct_message* received = (struct_message*)incomingData;
-    last_v2v_distance = received->distance;
+    last_v2v_distance_cm = received->distance;
     last_v2v_time = millis();
     v2v_packet_received_total++;
 }
@@ -115,29 +115,17 @@ void setServoAngle(int angle) {
 }
 
 float readUltrasonicSingle() {
-    // V2V LINK: We now read the wireless value instead of local pins
+    // V2V LINK: We now read the wireless value (CM) and convert to Meters for Navigation
     if (millis() - last_v2v_time > 1000) {
-        return 4.0; // Fail-safe: sensor node offline
+        return 4.0; 
     }
-    return last_v2v_distance;
+    return last_v2v_distance_cm / 100.0; // Return in METERS for EKF/Logic
 }
 
 float readUltrasonic() {
-    const int N = 10; // Restored for high accuracy
-    float s[N];
-    for(int i=0; i<N; i++) { 
-        s[i] = readUltrasonicSingle(); 
-        delay(5); 
-    }
-    // Outlier-removal filter
-    for(int i=0; i<N-1; i++) {
-        for(int j=0; j<N-i-1; j++) {
-            if(s[j] > s[j+1]) { float t=s[j]; s[j]=s[j+1]; s[j+1]=t; }
-        }
-    }
-    float sum = 0;
-    for(int i=2; i<N-2; i++) sum += s[i];
-    return sum / 6.0;
+    // Log the CM reading to Serial for the user
+    float m = readUltrasonicSingle();
+    return m;
 }
 
 void readIMU() {
@@ -169,10 +157,10 @@ void performMissionScan(QuasarPacket& packet) {
         delay(80); // Settling delay
         
         if (a % 2 == 0) {
-            float d = readUltrasonic();
+            float d = readUltrasonic(); // d is in Meters
             packet.ranges[a] = d;
             if (a+1 <= 180) packet.ranges[a+1] = d;
-            Serial.printf("[SCAN] %d: %.2fm\n", a, d);
+            Serial.printf("[SCAN] %d: %.0f cm\n", a, d * 100.0);
         }
     }
 

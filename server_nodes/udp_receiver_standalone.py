@@ -61,10 +61,10 @@ def main():
 
             # Print Summary
             valid_ranges = [r for r in ranges if 0.01 < r < 3.9]
-            avg_range = sum(valid_ranges) / len(valid_ranges) if valid_ranges else 0
+            avg_range_cm = (sum(valid_ranges) / len(valid_ranges)) * 100.0 if valid_ranges else 0
             yaw_deg = math.degrees(odom_yaw)
             
-            print(f"Agent {agent_id} | Link: {v2v_count} | Enc: {encoder_total} | Yaw: {yaw_deg:+.1f}°")
+            print(f"Agent {agent_id} | Link: {v2v_count} | Yaw: {yaw_deg:+.1f}° | Avg Range: {avg_range_cm:.0f} cm")
 
             # --- SAVE TO CSV ---
             if not os.path.exists('logs'): os.makedirs('logs')

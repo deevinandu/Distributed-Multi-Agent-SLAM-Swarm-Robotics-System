@@ -8,6 +8,9 @@
 #define ECHO_PIN 18
 #define SOUND_SPEED 0.0343
 
+#define WIFI_SSID "Gia"
+#define WIFI_PASSWORD "e7jt92zp"
+
 typedef struct struct_message {
     float distance;
 } struct_message;
@@ -20,12 +23,25 @@ void setup() {
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
     
+    // Set to Station mode and connect to sync Channel with Main Agent
     WiFi.mode(WIFI_STA);
-    if (esp_now_init() != ESP_OK) return;
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    Serial.print("[WIFI] Syncing Channel with Gia...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println(" Channel Synced!");
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
 
     esp_now_peer_info_t peerInfo;
     memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-    peerInfo.channel = 0;  // Set to 0 to find channel from WiFi
+    peerInfo.channel = 0;  
     peerInfo.encrypt = false;
     esp_now_add_peer(&peerInfo);
 }
@@ -37,13 +53,19 @@ void loop() {
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
     
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    float dist = (duration * SOUND_SPEED / 2.0) / 100.0;
-    if (duration == 0) dist = 4.0;
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms = ~5 meters
+    
+    // Distance = Time * Speed / 2 (result in Centimeters)
+    float distCm = (duration * SOUND_SPEED / 2.0);
+    
+    // If timeout (duration 0), set to 400cm
+    if (duration == 0) distCm = 400.0;
 
-    myData.distance = dist;
+    myData.distance = distCm; // We are now sending CM
     esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
     
-    Serial.printf("[V2V] Sending: %.2fm\n", dist);
-    delay(40); // 25Hz Scan Speed
+    // Detailed Debugging for the user
+    Serial.printf("[V2V] Raw Duration: %ld us | Distance: %.2f cm\n", duration, distCm);
+    
+    delay(50); // 20Hz Update
 }

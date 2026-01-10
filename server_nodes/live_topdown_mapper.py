@@ -114,7 +114,7 @@ def main():
                 fig.canvas.draw()
                 fig.canvas.flush_events()
                 
-                print(f"Agent {agent_id} | Link: {v2v_count} | Path Points: {len(path_x)} | Wall Points: {len(all_walls_x)}")
+                print(f"Agent {agent_id} | Link: {v2v_count} | Path: {len(path_x)} | Closest: {min([r for r in ranges if r > 0.01])*100.0:.0f}cm")
 
             except BlockingIOError:
                 plt.pause(0.01)
