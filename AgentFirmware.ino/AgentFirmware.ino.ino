@@ -37,12 +37,14 @@ const int stepDelay = 30; // 30ms per degree = slow methodical scan
 const float CM_PER_GROOVE = 30.0 / 28.0;
 
 // Navigation Parameters
-const float OBSTACLE_THRESHOLD = 0.25;  // 25cm
-const float SAFE_DISTANCE = 0.50;       // 50cm
+const float STOP_THRESHOLD = 0.40;      // 40cm - stop and survey
+const float SAFE_DISTANCE = 0.50;       // 50cm - decision threshold
 const float MOVE_DISTANCE_CM = 20.0;    
-const int MOTOR_SPEED = 190;            // High torque
+const int SLOW_MOTOR_SPEED = 100;       // Slow forward speed for debugging
+const int MOTOR_SPEED = 190;            // High torque (for turns)
 const int TURN_SPEED = 180;
 const int STARTUP_DELAY_SEC = 5;
+const int SERVO_SURVEY_DELAY = 40;      // Faster servo sweep (ms per degree)
 
 // ================= PROTOCOL =================
 struct __attribute__((packed)) QuasarPacket {
@@ -213,7 +215,7 @@ void moveForwardReactive() {
     interrupts();
     
     motor.drive(MOTOR_SPEED, MOTOR_SPEED);
-    Serial.println("[MOVE] Reactive Forward until 25cm...");
+    Serial.println("[MOVE] Reactive Forward until 40cm...");
     
     unsigned long start_time = millis();
     while((millis() - start_time) < 15000) { // 15s safety timeout
@@ -223,8 +225,8 @@ void moveForwardReactive() {
             Serial.printf("  Enc: %d | Dist: %.2f m\n", encoder_count, d);
         }
         
-        if(d < OBSTACLE_THRESHOLD) {
-            Serial.println("[HALT] 25cm Trigger Reached!");
+        if(d < STOP_THRESHOLD) {
+            Serial.println("[HALT] 40cm Trigger Reached!");
             break;
         }
         delay(30); 
@@ -259,49 +261,133 @@ void turn(int degrees, bool left) {
     motor.stop();
 }
 
+// ================= SURVEY SCAN =================
+// Survey distances at each 10-degree increment (0, 10, 20... 180)
+float survey_distances[19];
+
+int surveyScan() {
+    // Returns the servo angle (0-180) with the farthest distance
+    Serial.println("[SURVEY] Starting 180° scan...");
+    
+    // Center servo first
+    setServoAngle(90);
+    delay(300);
+    
+    // Sweep from 0 to 180 in 10-degree steps
+    for(int angle = 0; angle <= 180; angle += 10) {
+        setServoAngle(angle);
+        delay(SERVO_SURVEY_DELAY);
+        
+        float d = readUltrasonicSingle(); // Returns meters
+        int idx = angle / 10;
+        survey_distances[idx] = d;
+        Serial.printf("[SURVEY] %3d°: %.0f cm\n", angle, d * 100.0);
+    }
+    
+    // Return servo to center
+    setServoAngle(90);
+    delay(200);
+    
+    // Find the angle with maximum distance
+    int best_idx = 9; // Default to center (90°)
+    float max_dist = 0;
+    for(int i = 0; i < 19; i++) {
+        if(survey_distances[i] > max_dist) {
+            max_dist = survey_distances[i];
+            best_idx = i;
+        }
+    }
+    
+    int best_angle = best_idx * 10;
+    Serial.printf("[SURVEY] Best direction: %d° @ %.0f cm\n", best_angle, max_dist * 100.0);
+    return best_angle;
+}
+
+void turnToServoAngle(int servo_angle) {
+    // Convert servo angle (0-180) to robot turn
+    // Servo 90° = forward, 0° = right, 180° = left
+    // So we need to turn: (90 - servo_angle) degrees
+    // Positive = turn right, Negative = turn left
+    
+    int turn_degrees = 90 - servo_angle;
+    
+    if(abs(turn_degrees) < 15) {
+        Serial.println("[TURN] Already facing forward (±15°), no turn needed.");
+        return;
+    }
+    
+    bool turn_left = (turn_degrees < 0);
+    int abs_degrees = abs(turn_degrees);
+    
+    Serial.printf("[TURN] Turning %s %d degrees...\n", turn_left ? "LEFT" : "RIGHT", abs_degrees);
+    turn(abs_degrees, turn_left);
+    Serial.println("[TURN] Turn complete.");
+}
+
 void navigate() {
     if (checkMissionComplete()) {
-        mission_complete = true; Serial.println("MISSION COMPLETE!");
-        motor.stop(); return;
+        mission_complete = true; 
+        Serial.println("MISSION COMPLETE!");
+        motor.stop(); 
+        return;
     }
 
-    // 1. Initial State: If obstructed, scan and turn
-    float d_now = readUltrasonicSingle();
-    if (d_now <= OBSTACLE_THRESHOLD) {
-        Serial.println("[NAV] Path blocked. Scanning...");
-        
-        QuasarPacket p; performMissionScan(p); sendPacket(p);
-        
-        // Calculate Left and Right average distances
-        // Left = buckets 0-8 (0-90 degrees), Right = buckets 9-17 (90-180 degrees)
-        float left_avg = 0, right_avg = 0;
-        for(int i=0; i<9; i++) left_avg += bucket_distances[i];
-        for(int i=9; i<18; i++) right_avg += bucket_distances[i];
-        left_avg /= 9.0;
-        right_avg /= 9.0;
-        
-        Serial.printf("[NAV] Left: %.2fm | Right: %.2fm\n", left_avg, right_avg);
-        
-        // LEFT-FIRST Priority: If left has >60cm clearance, turn left
-        if(left_avg > 0.60) {
-            Serial.println("[NAV] Turning LEFT 15 deg.");
-            turn(15, true); // true = left
-        } else if(right_avg > 0.60) {
-            Serial.println("[NAV] Turning RIGHT 15 deg.");
-            turn(15, false); // false = right
-        } else {
-            // Both sides blocked -> Turn 90 degrees to the more open side
-            Serial.println("[NAV] Tight spot! Full turn.");
-            turn(90, left_avg > right_avg);
-        }
-    } else {
-        // 2. Path is clear -> Drive until 25cm
-        moveForwardReactive();
-        
-        // 3. Scan to map the wall we found
-        Serial.println("[NAV] At 25cm. Mapping wall...");
-        QuasarPacket p; performMissionScan(p); sendPacket(p);
+    // Check V2V link health
+    if (millis() - last_v2v_time > 500) {
+        Serial.println("[ERROR] V2V Link DOWN! Sensor Node not responding.");
+        motor.stop();
+        delay(1000);
+        return;
     }
+    
+    float d_now = readUltrasonicSingle();
+    Serial.printf("[NAV] Distance: %.0f cm | V2V Packets: %d\n", d_now * 100.0, v2v_packet_received_total);
+    
+    // STATE: Check if path is clear
+    if (d_now > STOP_THRESHOLD) {
+        // Path is clear - move forward slowly
+        Serial.println("[NAV] Path clear. Moving forward slowly...");
+        motor.drive(SLOW_MOTOR_SPEED, SLOW_MOTOR_SPEED);
+        
+        // Update position from encoders
+        noInterrupts();
+        long enc = encoder_count;
+        encoder_count = 0;
+        interrupts();
+        
+        float m = (enc * CM_PER_GROOVE) / 100.0;
+        robot_x += m * cos(robot_yaw);
+        robot_y += m * sin(robot_yaw);
+        total_distance_traveled += m;
+        
+        delay(100); // Brief forward movement
+        
+    } else {
+        // Obstacle detected - STOP and SURVEY
+        motor.stop();
+        Serial.printf("[NAV] STOP! Obstacle at %.0f cm. Surveying...\n", d_now * 100.0);
+        
+        // Perform 180° survey scan
+        int best_angle = surveyScan();
+        
+        // Turn to face the best direction
+        turnToServoAngle(best_angle);
+        
+        // Verify: Check forward distance after turn
+        delay(200);
+        float d_verify = readUltrasonicSingle();
+        Serial.printf("[VERIFY] Forward distance after turn: %.0f cm\n", d_verify * 100.0);
+        
+        if(d_verify < STOP_THRESHOLD) {
+            // Still blocked! Try again with a full 90° turn
+            Serial.println("[VERIFY] Still blocked! Forcing 90° left turn...");
+            turn(90, true);
+        } else {
+            Serial.println("[VERIFY] Path clear! Resuming forward...");
+        }
+    }
+    
+    delay(50); // Small pause between cycles
 }
 
 // ================= CORE =================
@@ -390,8 +476,11 @@ void loop() {
         digitalWrite(2, (millis()/500)%2); return;
     }
     unsigned long now = millis();
+    
+    // Always read IMU and update EKF (for real-time heading)
     readIMU();
-    sensor_msgs__msg__Imu msg; msg.angular_velocity.z = current_imu.angular_velocity.z; 
+    sensor_msgs__msg__Imu msg; 
+    msg.angular_velocity.z = current_imu.angular_velocity.z; 
     msg.linear_acceleration.x = current_imu.linear_acceleration.x;
     ekf.predict(msg, now/1000.0);
     nav_msgs__msg__Odometry o = ekf.getOdom();
@@ -399,6 +488,18 @@ void loop() {
     // Correct Yaw Extraction (2 * atan2(z, w))
     robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w); 
     
+    // Send UDP packet every 100ms for real-time heading visualization
+    static unsigned long last_udp_time = 0;
+    if(now - last_udp_time > 100) {
+        last_udp_time = now;
+        QuasarPacket packet;
+        // Zero out scan for continuous updates (only pose matters)
+        for(int i = 0; i < 181; i++) packet.ranges[i] = 0.0;
+        packet.scan_count = 0; // No scan data in this packet
+        sendPacket(packet);
+    }
+    
+    // Start navigation after startup delay
     if(now - startup_time > STARTUP_DELAY_SEC * 1000) {
         navigate();
     }

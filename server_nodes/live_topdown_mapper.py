@@ -1,6 +1,7 @@
 """
 Live Top-Down Cartesian Mapper
 Visualizes the robot's path and environment in absolute X,Y coordinates.
+Robot shown as TRIANGLE pointing in heading direction.
 
 Requirements: pip install matplotlib numpy
 """
@@ -8,6 +9,8 @@ import socket
 import struct
 import math
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.transforms import Affine2D
 import numpy as np
 import matplotlib
 
@@ -22,10 +25,22 @@ UDP_PORT = 8888
 PACKET_FMT = '<4sBfffiIH181f'
 PACKET_SIZE = struct.calcsize(PACKET_FMT)
 
+# Triangle robot marker (pointing UP = forward when yaw=0)
+TRIANGLE_SIZE = 0.12  # 12cm triangle
+
+def create_robot_triangle():
+    """Create triangle vertices centered at origin, pointing UP (yaw=0 direction)"""
+    return np.array([
+        [0, TRIANGLE_SIZE * 0.7],              # Nose (forward)
+        [-TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5],  # Left rear
+        [TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5]    # Right rear
+    ])
+
 def main():
     print("=" * 50)
-    print("Live Top-Down Mapper - Waiting for Agent...")
+    print("Live Top-Down Mapper - Triangle Robot View")
     print(f"Listening on UDP Port: {UDP_PORT}")
+    print("Rotate the robot by hand to test IMU heading!")
     print("=" * 50)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -39,19 +54,25 @@ def main():
 
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.set_title("Live 2D Floor Plan", fontsize=14)
+    ax.set_title("Live 2D Floor Plan - Triangle = Robot Heading", fontsize=14)
     ax.set_aspect('equal')
     ax.grid(True, linestyle='--', alpha=0.6)
     
-    ax.text(0, 2.1, "FORWARD", ha='center', va='bottom', color='green', fontweight='bold')
-    ax.text(0, -2.1, "BACKWARD", ha='center', va='top', color='gray', fontweight='bold')
-    ax.text(2.1, 0, "RIGHT", ha='left', va='center', color='blue', rotation=-90, fontweight='bold')
-    ax.text(-2.1, 0, "LEFT", ha='right', va='center', color='blue', rotation=90, fontweight='bold')
+    ax.text(0, 2.1, "FORWARD (+Y)", ha='center', va='bottom', color='green', fontweight='bold')
+    ax.text(0, -2.1, "BACKWARD (-Y)", ha='center', va='top', color='gray', fontweight='bold')
+    ax.text(2.1, 0, "RIGHT (+X)", ha='left', va='center', color='blue', rotation=-90, fontweight='bold')
+    ax.text(-2.1, 0, "LEFT (-X)", ha='right', va='center', color='blue', rotation=90, fontweight='bold')
 
     wall_points = ax.scatter([], [], s=2, c='blue', alpha=0.4, label='Detected Walls')
     scan_points = ax.scatter([], [], s=10, c='cyan', edgecolors='blue', alpha=0.9, label='Live Scan')
     robot_path, = ax.plot([], [], 'r-', label='Robot Path', alpha=0.6)
-    robot_pos, = ax.plot([], [], 'ro', markersize=10, markeredgecolor='white', label='Current Pos', zorder=10)
+    
+    # Robot triangle (replaces circle marker)
+    triangle_verts = create_robot_triangle()
+    robot_triangle = patches.Polygon(triangle_verts, closed=True, 
+                                      facecolor='red', edgecolor='darkred', 
+                                      linewidth=2, zorder=10, label='Robot')
+    ax.add_patch(robot_triangle)
     
     path_x, path_y = [], []
     all_walls_x, all_walls_y = [], []
@@ -80,7 +101,12 @@ def main():
                 path_x.append(rx)
                 path_y.append(ry)
                 robot_path.set_data(path_x, path_y)
-                robot_pos.set_data([rx], [ry])
+                
+                # Update triangle position and rotation
+                # Rotate by ryaw (heading), then translate to robot position
+                # Note: ryaw = 0 means pointing +Y (forward), so we rotate by (ryaw - pi/2) for matplotlib
+                transform = Affine2D().rotate(ryaw) + Affine2D().translate(rx, ry) + ax.transData
+                robot_triangle.set_transform(transform)
 
                 current_scan_x, current_scan_y = [], []
                 for i, dist in enumerate(ranges):
