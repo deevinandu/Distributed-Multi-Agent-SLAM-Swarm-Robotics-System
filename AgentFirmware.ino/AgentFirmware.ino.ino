@@ -10,8 +10,8 @@
 #include <esp_now.h> // New for Swarm Networking
 
 // ================= CONFIGURATION =================
-#define WIFI_SSID "Gia"
-#define WIFI_PASSWORD "e7jt92zp"
+#define WIFI_SSID "ONEPLUS_7T"
+#define WIFI_PASSWORD "dvhy03555"
 #define AGENT_ID 1 
 
 // Network
@@ -37,14 +37,12 @@ const int stepDelay = 30; // 30ms per degree = slow methodical scan
 const float CM_PER_GROOVE = 30.0 / 28.0;
 
 // Navigation Parameters
-const float STOP_THRESHOLD = 0.40;      // 40cm - stop and survey
-const float SAFE_DISTANCE = 0.50;       // 50cm - decision threshold
+const float OBSTACLE_THRESHOLD = 0.40;  // 40cm
+const float SAFE_DISTANCE = 0.50;       // 50cm
 const float MOVE_DISTANCE_CM = 20.0;    
-const int SLOW_MOTOR_SPEED = 100;       // Slow forward speed for debugging
-const int MOTOR_SPEED = 190;            // High torque (for turns)
-const int TURN_SPEED = 180;
+const int MOTOR_SPEED = 190;            // High torque
+const int TURN_SPEED = 200;            // Higher power for quick turns
 const int STARTUP_DELAY_SEC = 5;
-const int SERVO_SURVEY_DELAY = 40;      // Faster servo sweep (ms per degree)
 
 // ================= PROTOCOL =================
 struct __attribute__((packed)) QuasarPacket {
@@ -109,24 +107,57 @@ void IRAM_ATTR encoderISR() {
 }
 
 // ================= SENSORS =================
+int current_servo_angle = 90;  // Track servo position for reattach
+
 void setServoAngle(int angle) {
     if (angle < 0) angle = 0;
     if (angle > 180) angle = 180;
+    current_servo_angle = angle;
     int duty = map(angle, 0, 180, minDuty, maxDuty);
     ledcWrite(SERVO_PIN, duty);
 }
 
+// Single raw ultrasonic reading (direct hardware)
+float readUltrasonicRaw() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+    if (duration == 0) return 4.0;  // Timeout = max range
+    float dist_cm = (duration * SOUND_SPEED) / 2.0;
+    return dist_cm / 100.0;  // Return in METERS
+}
+
+// Median-of-3 filter: rejects single spike readings
 float readUltrasonicSingle() {
-    // V2V LINK: We now read the wireless value (CM) and convert to Meters for Navigation
-    if (millis() - last_v2v_time > 1000) {
-        return 4.0; 
+    // Pause servo PWM to avoid timer conflict with pulseIn
+    ledcDetach(SERVO_PIN);
+    delay(2);
+
+    float readings[3];
+    for (int i = 0; i < 3; i++) {
+        readings[i] = readUltrasonicRaw();
+        delayMicroseconds(300);
     }
-    return last_v2v_distance_cm / 100.0; // Return in METERS for EKF/Logic
+
+    // Reattach servo PWM and restore position
+    ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES);
+    setServoAngle(current_servo_angle);
+
+    // Sort 3 values (simple swap sort)
+    if (readings[0] > readings[1]) { float t = readings[0]; readings[0] = readings[1]; readings[1] = t; }
+    if (readings[1] > readings[2]) { float t = readings[1]; readings[1] = readings[2]; readings[2] = t; }
+    if (readings[0] > readings[1]) { float t = readings[0]; readings[0] = readings[1]; readings[1] = t; }
+
+    return readings[1];  // Median value
 }
 
 float readUltrasonic() {
-    // Log the CM reading to Serial for the user
     float m = readUltrasonicSingle();
+    Serial.printf("[US] Distance: %.0f cm\n", m * 100.0);
     return m;
 }
 
@@ -225,7 +256,7 @@ void moveForwardReactive() {
             Serial.printf("  Enc: %d | Dist: %.2f m\n", encoder_count, d);
         }
         
-        if(d < STOP_THRESHOLD) {
+        if(d < OBSTACLE_THRESHOLD) {
             Serial.println("[HALT] 40cm Trigger Reached!");
             break;
         }
@@ -240,154 +271,106 @@ void moveForwardReactive() {
 }
 
 void turn(int degrees, bool left) {
-    float start_yaw = robot_yaw;
-    float target_rad = radians(abs(degrees));
-    motor.drive(left ? -TURN_SPEED : TURN_SPEED, left ? TURN_SPEED : -TURN_SPEED);
+    Serial.printf("[TURN] Turning %s %d degrees (encoder-based)...\n", left ? "LEFT" : "RIGHT", degrees);
     
-    unsigned long start_time = millis();
-    while(abs(robot_yaw - start_yaw) < target_rad && (millis() - start_time) < 5000) {
-        readIMU();
-        // Force EKF update during turn
-        sensor_msgs__msg__Imu msg; 
-        msg.angular_velocity.z = current_imu.angular_velocity.z; 
-        msg.linear_acceleration.x = current_imu.linear_acceleration.x;
-        ekf.predict(msg, millis()/1000.0);
-        nav_msgs__msg__Odometry o = ekf.getOdom();
+    // Empirical calibration: 45 encoder pulses = 100 degrees
+    // Therefore: 0.45 pulses per degree
+    const float ENCODER_PULSES_PER_DEGREE = 0.45;
+    int target_encoder = degrees * ENCODER_PULSES_PER_DEGREE;
+    
+    // Reset encoder
+    noInterrupts();
+    encoder_count = 0;
+    interrupts();
+    
+    Serial.printf("[TURN] Target: %d encoder pulses\n", target_encoder);
+    
+    // Differential turn: both wheels spin in opposite directions (FIXED DIRECTIONS)
+    // LEFT: left forward, right backward
+    // RIGHT: left backward, right forward
+    motor.drive(left ? TURN_SPEED : -TURN_SPEED, left ? -TURN_SPEED : TURN_SPEED);
+    
+    // Turn incrementally until encoder target reached
+    unsigned long turn_start = millis();
+    while (encoder_count < target_encoder) {
+        delay(50);  // Small time slice
         
-        // Correct Yaw Extraction
-        robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w);
-        delay(10);
-    }
-    motor.stop();
-}
-
-// ================= SURVEY SCAN =================
-// Survey distances at each 10-degree increment (0, 10, 20... 180)
-float survey_distances[19];
-
-int surveyScan() {
-    // Returns the servo angle (0-180) with the farthest distance
-    Serial.println("[SURVEY] Starting 180° scan...");
-    
-    // Center servo first
-    setServoAngle(90);
-    delay(300);
-    
-    // Sweep from 0 to 180 in 10-degree steps
-    for(int angle = 0; angle <= 180; angle += 10) {
-        setServoAngle(angle);
-        delay(SERVO_SURVEY_DELAY);
+        // Safety timeout
+        if (millis() - turn_start > 10000) {
+            Serial.println("[TURN] Timeout! Stopping.");
+            break;
+        }
         
-        float d = readUltrasonicSingle(); // Returns meters
-        int idx = angle / 10;
-        survey_distances[idx] = d;
-        Serial.printf("[SURVEY] %3d°: %.0f cm\n", angle, d * 100.0);
-    }
-    
-    // Return servo to center
-    setServoAngle(90);
-    delay(200);
-    
-    // Find the angle with maximum distance
-    int best_idx = 9; // Default to center (90°)
-    float max_dist = 0;
-    for(int i = 0; i < 19; i++) {
-        if(survey_distances[i] > max_dist) {
-            max_dist = survey_distances[i];
-            best_idx = i;
+        if (encoder_count % 5 == 0) {
+            Serial.printf("  Encoder: %d / %d\n", encoder_count, target_encoder);
         }
     }
     
-    int best_angle = best_idx * 10;
-    Serial.printf("[SURVEY] Best direction: %d° @ %.0f cm\n", best_angle, max_dist * 100.0);
-    return best_angle;
-}
-
-void turnToServoAngle(int servo_angle) {
-    // Convert servo angle (0-180) to robot turn
-    // Servo 90° = forward, 0° = right, 180° = left
-    // So we need to turn: (90 - servo_angle) degrees
-    // Positive = turn right, Negative = turn left
+    // Stop
+    motor.stop();
     
-    int turn_degrees = 90 - servo_angle;
+    Serial.printf("[TURN] Complete. Encoder count: %d (target: %d)\n", encoder_count, target_encoder);
     
-    if(abs(turn_degrees) < 15) {
-        Serial.println("[TURN] Already facing forward (±15°), no turn needed.");
-        return;
-    }
+    // Update EKF yaw estimate
+    float yaw_change = radians(left ? degrees : -degrees);
+    robot_yaw += yaw_change;
     
-    bool turn_left = (turn_degrees < 0);
-    int abs_degrees = abs(turn_degrees);
+    // Normalize to [-PI, PI]
+    while (robot_yaw > PI) robot_yaw -= 2 * PI;
+    while (robot_yaw < -PI) robot_yaw += 2 * PI;
     
-    Serial.printf("[TURN] Turning %s %d degrees...\n", turn_left ? "LEFT" : "RIGHT", abs_degrees);
-    turn(abs_degrees, turn_left);
-    Serial.println("[TURN] Turn complete.");
+    delay(200);  // Settle time
+    
+    // Brief forward movement to clear obstacle zone (prevents immediate re-scan)
+    Serial.println("[TURN] Moving forward to clear obstacle...");
+    motor.drive(MOTOR_SPEED, MOTOR_SPEED);
+    delay(500);  // Move forward for 0.5 seconds
+    motor.stop();
 }
 
 void navigate() {
     if (checkMissionComplete()) {
-        mission_complete = true; 
-        Serial.println("MISSION COMPLETE!");
-        motor.stop(); 
-        return;
+        mission_complete = true; Serial.println("MISSION COMPLETE!");
+        motor.stop(); return;
     }
 
-    // Check V2V link health
-    if (millis() - last_v2v_time > 500) {
-        Serial.println("[ERROR] V2V Link DOWN! Sensor Node not responding.");
-        motor.stop();
-        delay(1000);
-        return;
-    }
-    
+    // 1. Initial State: If obstructed, scan and turn
     float d_now = readUltrasonicSingle();
-    Serial.printf("[NAV] Distance: %.0f cm | V2V Packets: %d\n", d_now * 100.0, v2v_packet_received_total);
-    
-    // STATE: Check if path is clear
-    if (d_now > STOP_THRESHOLD) {
-        // Path is clear - move forward slowly
-        Serial.println("[NAV] Path clear. Moving forward slowly...");
-        motor.drive(SLOW_MOTOR_SPEED, SLOW_MOTOR_SPEED);
+    if (d_now <= OBSTACLE_THRESHOLD) {
+        Serial.println("[NAV] Path blocked. Scanning...");
         
-        // Update position from encoders
-        noInterrupts();
-        long enc = encoder_count;
-        encoder_count = 0;
-        interrupts();
+        QuasarPacket p; performMissionScan(p); sendPacket(p);
         
-        float m = (enc * CM_PER_GROOVE) / 100.0;
-        robot_x += m * cos(robot_yaw);
-        robot_y += m * sin(robot_yaw);
-        total_distance_traveled += m;
+        // Calculate Left and Right average distances
+        // RIGHT = buckets 0-8 (0-90 degrees), LEFT = buckets 9-17 (90-180 degrees)
+        float left_avg = 0, right_avg = 0;
+        for(int i=0; i<9; i++) right_avg += bucket_distances[i];    // FIXED: 0-90° is right
+        for(int i=9; i<18; i++) left_avg += bucket_distances[i];    // FIXED: 90-180° is left
+        left_avg /= 9.0;
+        right_avg /= 9.0;
         
-        delay(100); // Brief forward movement
+        Serial.printf("[NAV] Left: %.2fm | Right: %.2fm\n", left_avg, right_avg);
         
-    } else {
-        // Obstacle detected - STOP and SURVEY
-        motor.stop();
-        Serial.printf("[NAV] STOP! Obstacle at %.0f cm. Surveying...\n", d_now * 100.0);
-        
-        // Perform 180° survey scan
-        int best_angle = surveyScan();
-        
-        // Turn to face the best direction
-        turnToServoAngle(best_angle);
-        
-        // Verify: Check forward distance after turn
-        delay(200);
-        float d_verify = readUltrasonicSingle();
-        Serial.printf("[VERIFY] Forward distance after turn: %.0f cm\n", d_verify * 100.0);
-        
-        if(d_verify < STOP_THRESHOLD) {
-            // Still blocked! Try again with a full 90° turn
-            Serial.println("[VERIFY] Still blocked! Forcing 90° left turn...");
-            turn(90, true);
+        // LEFT-FIRST Priority: If left has >60cm clearance, turn left
+        if(left_avg > 0.60) {
+            Serial.println("[NAV] Turning LEFT 15 deg.");
+            turn(15, true); // true = left
+        } else if(right_avg > 0.60) {
+            Serial.println("[NAV] Turning RIGHT 15 deg.");
+            turn(15, false); // false = right
         } else {
-            Serial.println("[VERIFY] Path clear! Resuming forward...");
+            // Both sides blocked -> Turn 30 degrees to the more open side
+            Serial.println("[NAV] Tight spot! 30° turn.");
+            turn(30, left_avg > right_avg);
         }
+    } else {
+        // 2. Path is clear -> Drive until 40cm
+        moveForwardReactive();
+        
+        // 3. Scan to map the wall we found
+        Serial.println("[NAV] At 40cm. Mapping wall...");
+        QuasarPacket p; performMissionScan(p); sendPacket(p);
     }
-    
-    delay(50); // Small pause between cycles
 }
 
 // ================= CORE =================
@@ -421,6 +404,10 @@ void setup() {
     gyroZ_offset = gz_sum / samples; 
     accX_offset = ax_sum / samples;
     Serial.println("[BOOT] Calibration Done.");
+    
+    Serial.println("[BOOT] Initializing Ultrasonic (HC-SR04)...");
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
     
     Serial.println("[BOOT] Initializing Encoder...");
     pinMode(ENCODER_PIN, INPUT); 
@@ -476,11 +463,8 @@ void loop() {
         digitalWrite(2, (millis()/500)%2); return;
     }
     unsigned long now = millis();
-    
-    // Always read IMU and update EKF (for real-time heading)
     readIMU();
-    sensor_msgs__msg__Imu msg; 
-    msg.angular_velocity.z = current_imu.angular_velocity.z; 
+    sensor_msgs__msg__Imu msg; msg.angular_velocity.z = current_imu.angular_velocity.z; 
     msg.linear_acceleration.x = current_imu.linear_acceleration.x;
     ekf.predict(msg, now/1000.0);
     nav_msgs__msg__Odometry o = ekf.getOdom();
@@ -488,18 +472,6 @@ void loop() {
     // Correct Yaw Extraction (2 * atan2(z, w))
     robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w); 
     
-    // Send UDP packet every 100ms for real-time heading visualization
-    static unsigned long last_udp_time = 0;
-    if(now - last_udp_time > 100) {
-        last_udp_time = now;
-        QuasarPacket packet;
-        // Zero out scan for continuous updates (only pose matters)
-        for(int i = 0; i < 181; i++) packet.ranges[i] = 0.0;
-        packet.scan_count = 0; // No scan data in this packet
-        sendPacket(packet);
-    }
-    
-    // Start navigation after startup delay
     if(now - startup_time > STARTUP_DELAY_SEC * 1000) {
         navigate();
     }
