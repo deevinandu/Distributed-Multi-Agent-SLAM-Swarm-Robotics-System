@@ -34,7 +34,13 @@ const int stepDelay = 30; // 30ms per degree = slow methodical scan
 
 // Encoder
 #define ENCODER_PIN 34
-const float CM_PER_GROOVE = 30.0 / 28.0;
+// Wheel Circumference = 21 cm
+// ASSUMPTION: Standard optical encoder disk has 20 slots. 
+// If using RISING interrupt on one pin, that is 20 ticks per revolution.
+// If using CHANGE interrupt, it would be 40. The code uses RISING.
+const float WHEEL_CIRCUMFERENCE_CM = 21.0;
+const float TICKS_PER_REV = 20.0; 
+const float CM_PER_GROOVE = WHEEL_CIRCUMFERENCE_CM / TICKS_PER_REV; // ~1.05 cm per tick
 
 // Navigation Parameters
 const float OBSTACLE_THRESHOLD = 0.40;  // 40cm
@@ -328,6 +334,32 @@ void turn(int degrees, bool left) {
     motor.stop();
 }
 
+void moveBackward() {
+    // Atomic Reset
+    noInterrupts();
+    encoder_count = 0;
+    interrupts();
+    
+    Serial.println("[MOVE] Reversing 15cm...");
+    motor.drive(-MOTOR_SPEED, -MOTOR_SPEED);
+    
+    // Reverse for ~15cm
+    // 15cm / 1.05cm_per_tick ~= 14 ticks
+    int target = 14; 
+    
+    unsigned long start_time = millis();
+    while(encoder_count < target && (millis() - start_time) < 2000) {
+        delay(10);
+    }
+    motor.stop();
+    
+    // Update Global Pose (Approximate)
+    // Subtract distance
+    float m = (encoder_count * CM_PER_GROOVE) / 100.0;
+    robot_x -= m * cos(robot_yaw); robot_y -= m * sin(robot_yaw);
+    total_distance_traveled += m; // Travel is scalar
+}
+
 void navigate() {
     if (checkMissionComplete()) {
         mission_complete = true; Serial.println("MISSION COMPLETE!");
@@ -359,9 +391,11 @@ void navigate() {
             Serial.println("[NAV] Turning RIGHT 15 deg.");
             turn(15, false); // false = right
         } else {
-            // Both sides blocked -> Turn 30 degrees to the more open side
-            Serial.println("[NAV] Tight spot! 30° turn.");
-            turn(30, left_avg > right_avg);
+            // Both sides blocked -> TRAPPED
+            Serial.println("[NAV] TRAPPED! Reversing and turning around.");
+            moveBackward();
+            delay(500);
+            turn(180, true); // Turn around
         }
     } else {
         // 2. Path is clear -> Drive until 40cm
