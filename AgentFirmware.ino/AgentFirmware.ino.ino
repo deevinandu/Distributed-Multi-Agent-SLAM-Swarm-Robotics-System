@@ -10,8 +10,8 @@
 #include <esp_now.h> // New for Swarm Networking
 
 // ================= CONFIGURATION =================
-#define WIFI_SSID "Gia"
-#define WIFI_PASSWORD "e7jt92zp"
+#define WIFI_SSID "ONEPLUS_7T"
+#define WIFI_PASSWORD "dvhy03555"
 #define AGENT_ID 1 
 
 // Network
@@ -107,24 +107,57 @@ void IRAM_ATTR encoderISR() {
 }
 
 // ================= SENSORS =================
+int current_servo_angle = 90;  // Track servo position for reattach
+
 void setServoAngle(int angle) {
     if (angle < 0) angle = 0;
     if (angle > 180) angle = 180;
+    current_servo_angle = angle;
     int duty = map(angle, 0, 180, minDuty, maxDuty);
     ledcWrite(SERVO_PIN, duty);
 }
 
+// Single raw ultrasonic reading (direct hardware)
+float readUltrasonicRaw() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+    if (duration == 0) return 4.0;  // Timeout = max range
+    float dist_cm = (duration * SOUND_SPEED) / 2.0;
+    return dist_cm / 100.0;  // Return in METERS
+}
+
+// Median-of-3 filter: rejects single spike readings
 float readUltrasonicSingle() {
-    // V2V LINK: We now read the wireless value (CM) and convert to Meters for Navigation
-    if (millis() - last_v2v_time > 1000) {
-        return 4.0; 
+    // Pause servo PWM to avoid timer conflict with pulseIn
+    ledcDetach(SERVO_PIN);
+    delay(2);
+
+    float readings[3];
+    for (int i = 0; i < 3; i++) {
+        readings[i] = readUltrasonicRaw();
+        delayMicroseconds(300);
     }
-    return last_v2v_distance_cm / 100.0; // Return in METERS for EKF/Logic
+
+    // Reattach servo PWM and restore position
+    ledcAttach(SERVO_PIN, SERVO_FREQ, SERVO_RES);
+    setServoAngle(current_servo_angle);
+
+    // Sort 3 values (simple swap sort)
+    if (readings[0] > readings[1]) { float t = readings[0]; readings[0] = readings[1]; readings[1] = t; }
+    if (readings[1] > readings[2]) { float t = readings[1]; readings[1] = readings[2]; readings[2] = t; }
+    if (readings[0] > readings[1]) { float t = readings[0]; readings[0] = readings[1]; readings[1] = t; }
+
+    return readings[1];  // Median value
 }
 
 float readUltrasonic() {
-    // Log the CM reading to Serial for the user
     float m = readUltrasonicSingle();
+    Serial.printf("[US] Distance: %.0f cm\n", m * 100.0);
     return m;
 }
 
@@ -238,25 +271,31 @@ void moveForwardReactive() {
 }
 
 void turn(int degrees, bool left) {
-    float start_yaw = robot_yaw;
-    float target_rad = radians(abs(degrees));
+    Serial.printf("[TURN] Turning %s %d degrees...\n", left ? "LEFT" : "RIGHT", degrees);
+    
+    // Empirical calibration: ~70ms per degree at TURN_SPEED=180
+    unsigned long turn_duration_ms = degrees * 70;
+    
+    // Start motors
     motor.drive(left ? -TURN_SPEED : TURN_SPEED, left ? TURN_SPEED : -TURN_SPEED);
     
-    unsigned long start_time = millis();
-    while(abs(robot_yaw - start_yaw) < target_rad && (millis() - start_time) < 5000) {
-        readIMU();
-        // Force EKF update during turn
-        sensor_msgs__msg__Imu msg; 
-        msg.angular_velocity.z = current_imu.angular_velocity.z; 
-        msg.linear_acceleration.x = current_imu.linear_acceleration.x;
-        ekf.predict(msg, millis()/1000.0);
-        nav_msgs__msg__Odometry o = ekf.getOdom();
-        
-        // Correct Yaw Extraction
-        robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w);
-        delay(10);
-    }
+    // Turn for calibrated duration
+    delay(turn_duration_ms);
+    
+    // Stop
     motor.stop();
+    
+    Serial.printf("[TURN] Complete. Estimated yaw change: %d°\n", left ? degrees : -degrees);
+    
+    // Update EKF yaw estimate (tell it we turned, even if gyro missed it)
+    float yaw_change = radians(left ? degrees : -degrees);
+    robot_yaw += yaw_change;
+    
+    // Normalize to [-PI, PI]
+    while (robot_yaw > PI) robot_yaw -= 2 * PI;
+    while (robot_yaw < -PI) robot_yaw += 2 * PI;
+    
+    delay(200);  // Settle time
 }
 
 void navigate() {
@@ -335,6 +374,10 @@ void setup() {
     gyroZ_offset = gz_sum / samples; 
     accX_offset = ax_sum / samples;
     Serial.println("[BOOT] Calibration Done.");
+    
+    Serial.println("[BOOT] Initializing Ultrasonic (HC-SR04)...");
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
     
     Serial.println("[BOOT] Initializing Encoder...");
     pinMode(ENCODER_PIN, INPUT); 
