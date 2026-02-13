@@ -37,11 +37,11 @@ const int stepDelay = 30; // 30ms per degree = slow methodical scan
 const float CM_PER_GROOVE = 30.0 / 28.0;
 
 // Navigation Parameters
-const float OBSTACLE_THRESHOLD = 0.25;  // 25cm
+const float OBSTACLE_THRESHOLD = 0.40;  // 40cm
 const float SAFE_DISTANCE = 0.50;       // 50cm
 const float MOVE_DISTANCE_CM = 20.0;    
 const int MOTOR_SPEED = 190;            // High torque
-const int TURN_SPEED = 180;
+const int TURN_SPEED = 200;            // Higher power for quick turns
 const int STARTUP_DELAY_SEC = 5;
 
 // ================= PROTOCOL =================
@@ -246,7 +246,7 @@ void moveForwardReactive() {
     interrupts();
     
     motor.drive(MOTOR_SPEED, MOTOR_SPEED);
-    Serial.println("[MOVE] Reactive Forward until 25cm...");
+    Serial.println("[MOVE] Reactive Forward until 40cm...");
     
     unsigned long start_time = millis();
     while((millis() - start_time) < 15000) { // 15s safety timeout
@@ -257,7 +257,7 @@ void moveForwardReactive() {
         }
         
         if(d < OBSTACLE_THRESHOLD) {
-            Serial.println("[HALT] 25cm Trigger Reached!");
+            Serial.println("[HALT] 40cm Trigger Reached!");
             break;
         }
         delay(30); 
@@ -271,23 +271,47 @@ void moveForwardReactive() {
 }
 
 void turn(int degrees, bool left) {
-    Serial.printf("[TURN] Turning %s %d degrees...\n", left ? "LEFT" : "RIGHT", degrees);
+    Serial.printf("[TURN] Turning %s %d degrees (encoder-based)...\n", left ? "LEFT" : "RIGHT", degrees);
     
-    // Empirical calibration: ~70ms per degree at TURN_SPEED=180
-    unsigned long turn_duration_ms = degrees * 70;
+    // Empirical calibration: 45 encoder pulses = 100 degrees
+    // Therefore: 0.45 pulses per degree
+    const float ENCODER_PULSES_PER_DEGREE = 0.45;
+    int target_encoder = degrees * ENCODER_PULSES_PER_DEGREE;
     
-    // Start motors
-    motor.drive(left ? -TURN_SPEED : TURN_SPEED, left ? TURN_SPEED : -TURN_SPEED);
+    // Reset encoder
+    noInterrupts();
+    encoder_count = 0;
+    interrupts();
     
-    // Turn for calibrated duration
-    delay(turn_duration_ms);
+    Serial.printf("[TURN] Target: %d encoder pulses\n", target_encoder);
+    
+    // Differential turn: both wheels spin in opposite directions (FIXED DIRECTIONS)
+    // LEFT: left forward, right backward
+    // RIGHT: left backward, right forward
+    motor.drive(left ? TURN_SPEED : -TURN_SPEED, left ? -TURN_SPEED : TURN_SPEED);
+    
+    // Turn incrementally until encoder target reached
+    unsigned long turn_start = millis();
+    while (encoder_count < target_encoder) {
+        delay(50);  // Small time slice
+        
+        // Safety timeout
+        if (millis() - turn_start > 10000) {
+            Serial.println("[TURN] Timeout! Stopping.");
+            break;
+        }
+        
+        if (encoder_count % 5 == 0) {
+            Serial.printf("  Encoder: %d / %d\n", encoder_count, target_encoder);
+        }
+    }
     
     // Stop
     motor.stop();
     
-    Serial.printf("[TURN] Complete. Estimated yaw change: %d°\n", left ? degrees : -degrees);
+    Serial.printf("[TURN] Complete. Encoder count: %d (target: %d)\n", encoder_count, target_encoder);
     
-    // Update EKF yaw estimate (tell it we turned, even if gyro missed it)
+    // Update EKF yaw estimate
     float yaw_change = radians(left ? degrees : -degrees);
     robot_yaw += yaw_change;
     
@@ -296,6 +320,12 @@ void turn(int degrees, bool left) {
     while (robot_yaw < -PI) robot_yaw += 2 * PI;
     
     delay(200);  // Settle time
+    
+    // Brief forward movement to clear obstacle zone (prevents immediate re-scan)
+    Serial.println("[TURN] Moving forward to clear obstacle...");
+    motor.drive(MOTOR_SPEED, MOTOR_SPEED);
+    delay(500);  // Move forward for 0.5 seconds
+    motor.stop();
 }
 
 void navigate() {
@@ -312,10 +342,10 @@ void navigate() {
         QuasarPacket p; performMissionScan(p); sendPacket(p);
         
         // Calculate Left and Right average distances
-        // Left = buckets 0-8 (0-90 degrees), Right = buckets 9-17 (90-180 degrees)
+        // RIGHT = buckets 0-8 (0-90 degrees), LEFT = buckets 9-17 (90-180 degrees)
         float left_avg = 0, right_avg = 0;
-        for(int i=0; i<9; i++) left_avg += bucket_distances[i];
-        for(int i=9; i<18; i++) right_avg += bucket_distances[i];
+        for(int i=0; i<9; i++) right_avg += bucket_distances[i];    // FIXED: 0-90° is right
+        for(int i=9; i<18; i++) left_avg += bucket_distances[i];    // FIXED: 90-180° is left
         left_avg /= 9.0;
         right_avg /= 9.0;
         
@@ -329,16 +359,16 @@ void navigate() {
             Serial.println("[NAV] Turning RIGHT 15 deg.");
             turn(15, false); // false = right
         } else {
-            // Both sides blocked -> Turn 90 degrees to the more open side
-            Serial.println("[NAV] Tight spot! Full turn.");
-            turn(90, left_avg > right_avg);
+            // Both sides blocked -> Turn 30 degrees to the more open side
+            Serial.println("[NAV] Tight spot! 30° turn.");
+            turn(30, left_avg > right_avg);
         }
     } else {
-        // 2. Path is clear -> Drive until 25cm
+        // 2. Path is clear -> Drive until 40cm
         moveForwardReactive();
         
         // 3. Scan to map the wall we found
-        Serial.println("[NAV] At 25cm. Mapping wall...");
+        Serial.println("[NAV] At 40cm. Mapping wall...");
         QuasarPacket p; performMissionScan(p); sendPacket(p);
     }
 }
