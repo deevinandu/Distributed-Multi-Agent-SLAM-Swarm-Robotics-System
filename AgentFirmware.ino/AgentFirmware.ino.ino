@@ -15,7 +15,7 @@
 #define AGENT_ID 1 
 
 // Network
-const char* agent_ip = "172.25.35.255"; // Broadcast address for your new subnet
+const char* agent_ip = "10.218.44.255"; // Broadcast address for your current subnet
 const int agent_port = 8888;
 const int local_port = 8888;
 

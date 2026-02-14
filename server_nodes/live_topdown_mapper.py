@@ -1,48 +1,70 @@
 """
-Live Top-Down Cartesian Mapper
-Visualizes the robot's path and environment in absolute X,Y coordinates.
-Robot shown as TRIANGLE pointing in heading direction.
-
-Requirements: pip install matplotlib numpy
+Live Top-Down Persistent Mapper with Full Logging
+- Creates a new log folder for each session
+- Logs raw UDP packets, telemetry, and point cloud data to CSVs
+- Visualizes real-time map
 """
 import socket
 import struct
 import math
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.transforms import Affine2D
-import numpy as np
+import os
+import time
+import datetime
+import csv
 import matplotlib
-
-# Force TkAgg for Windows stability
 try:
     matplotlib.use('TkAgg')
 except:
     pass
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.transforms import Affine2D
+import numpy as np
 
 # Configuration
 UDP_PORT = 8888
 PACKET_FMT = '<4sBfffiIH181f'
 PACKET_SIZE = struct.calcsize(PACKET_FMT)
 
-# Triangle robot marker (pointing UP = forward when yaw=0)
-TRIANGLE_SIZE = 0.12  # 12cm triangle
+# Filtering threshold
+MAX_TRUST_DIST_M = 1.2  # Ignore > 1.2m
+MIN_TRUST_DIST_M = 0.05 # Ignore < 5cm
+
+# Triangle robot marker
+TRIANGLE_SIZE = 0.12
 
 def create_robot_triangle():
-    """Create triangle vertices centered at origin, pointing UP (yaw=0 direction)"""
     return np.array([
-        [0, TRIANGLE_SIZE * 0.7],              # Nose (forward)
-        [-TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5],  # Left rear
-        [TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5]    # Right rear
+        [0, TRIANGLE_SIZE * 0.7],
+        [-TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5],
+        [TRIANGLE_SIZE * 0.5, -TRIANGLE_SIZE * 0.5]
     ])
 
 def main():
-    print("=" * 50)
-    print("Live Top-Down Mapper - Triangle Robot View")
-    print(f"Listening on UDP Port: {UDP_PORT}")
-    print("Rotate the robot by hand to test IMU heading!")
-    print("=" * 50)
+    # --- SETUP LOGGING ---
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = os.path.join("logs", f"session_{timestamp}")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    csv_telemetry_path = os.path.join(log_dir, "telemetry.csv")
+    csv_points_path = os.path.join(log_dir, "pointcloud.csv")
+    
+    # Open CSV files
+    f_telem = open(csv_telemetry_path, 'w', newline='')
+    writer_telem = csv.writer(f_telem)
+    writer_telem.writerow(['timestamp', 'agent_id', 'x', 'y', 'yaw', 'encoder', 'v2v_count', 'ranges_181'])
+    
+    f_points = open(csv_points_path, 'w', newline='')
+    writer_points = csv.writer(f_points)
+    writer_points.writerow(['timestamp', 'x', 'y'])
 
+    print("=" * 60)
+    print(f"  Live Mapper & Logger")
+    print(f"  Listening on UDP Port: {UDP_PORT}")
+    print(f"  Logging to: {log_dir}")
+    print("=" * 60)
+
+    # --- NETWORKING ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -52,33 +74,34 @@ def main():
         return
     sock.setblocking(False)
 
+    # --- VISUALIZATION ---
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.set_title("Live 2D Floor Plan - Triangle = Robot Heading", fontsize=14)
+    ax.set_title(f"Live Map - Session {timestamp}", fontsize=14)
     ax.set_aspect('equal')
-    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.grid(True, linestyle='--', alpha=0.4)
     
-    ax.text(0, 2.1, "FORWARD (+Y)", ha='center', va='bottom', color='green', fontweight='bold')
-    ax.text(0, -2.1, "BACKWARD (-Y)", ha='center', va='top', color='gray', fontweight='bold')
-    ax.text(2.1, 0, "RIGHT (+X)", ha='left', va='center', color='blue', rotation=-90, fontweight='bold')
-    ax.text(-2.1, 0, "LEFT (-X)", ha='right', va='center', color='blue', rotation=90, fontweight='bold')
-
-    wall_points = ax.scatter([], [], s=2, c='blue', alpha=0.4, label='Detected Walls')
-    scan_points = ax.scatter([], [], s=10, c='cyan', edgecolors='blue', alpha=0.9, label='Live Scan')
-    robot_path, = ax.plot([], [], 'r-', label='Robot Path', alpha=0.6)
+    # Persistent Point Cloud (Global Map)
+    cloud_scatter = ax.scatter([], [], s=4, c='black', alpha=0.6, label='Global Map (Persistent)')
+    # Current Scan (Dynamic)
+    scan_scatter = ax.scatter([], [], s=15, c='red', alpha=0.9, label='Latest Scan')
+    # Robot Path
+    robot_path, = ax.plot([], [], 'g-', linewidth=1, label='Path', alpha=0.5)
     
-    # Robot triangle (replaces circle marker)
-    triangle_verts = create_robot_triangle()
-    robot_triangle = patches.Polygon(triangle_verts, closed=True, 
-                                      facecolor='red', edgecolor='darkred', 
-                                      linewidth=2, zorder=10, label='Robot')
-    ax.add_patch(robot_triangle)
+    # Robot Marker
+    tri_verts = create_robot_triangle()
+    robot_tri = patches.Polygon(tri_verts, closed=True, 
+                                facecolor='lime', edgecolor='black', 
+                                linewidth=1, zorder=10, label='Robot')
+    ax.add_patch(robot_tri)
     
+    # Data storage for plotting
+    global_map_x = []
+    global_map_y = []
     path_x, path_y = [], []
-    all_walls_x, all_walls_y = [], []
     
-    ax.set_xlim(-2.2, 2.2)
-    ax.set_ylim(-2.2, 2.2)
+    ax.set_xlim(-2, 2)
+    ax.set_ylim(-2, 2)
     ax.legend(loc='upper right')
 
     try:
@@ -89,67 +112,120 @@ def main():
                 if len(data) != PACKET_SIZE:
                     continue
 
+                recv_time = time.time()
                 unpacked = struct.unpack(PACKET_FMT, data)
                 magic = unpacked[0]
                 if magic != b'QSRL': continue
 
                 agent_id = unpacked[1]
                 rx, ry, ryaw = unpacked[2], unpacked[3], unpacked[4]
+                enc = unpacked[5]
                 v2v_count = unpacked[6]
                 ranges = list(unpacked[8:])
 
+                # --- LOG TELEMETRY ---
+                # Save ranges as a long string or individual columns? String is cleaner for now.
+                writer_telem.writerow([recv_time, agent_id, rx, ry, ryaw, enc, v2v_count, str(ranges)])
+                f_telem.flush()
+
+                # --- UPDATE PATH ---
                 path_x.append(rx)
                 path_y.append(ry)
                 robot_path.set_data(path_x, path_y)
                 
-                # Update triangle position and rotation
-                # Rotate by ryaw (heading), then translate to robot position
-                # Note: ryaw = 0 means pointing +Y (forward), so we rotate by (ryaw - pi/2) for matplotlib
-                transform = Affine2D().rotate(ryaw) + Affine2D().translate(rx, ry) + ax.transData
-                robot_triangle.set_transform(transform)
+                # --- UPDATE ROBOT MARKER ---
+                t = Affine2D().rotate(ryaw - np.pi/2) + Affine2D().translate(rx, ry) + ax.transData
+                robot_tri.set_transform(t)
 
-                current_scan_x, current_scan_y = [], []
-                for i, dist in enumerate(ranges):
-                    # TRUST FILTER: Only map walls closer than 50cm
-                    if 0.05 < dist <= 0.50:
-                        angle_world = ryaw + math.radians(i - 90)
-                        wx = rx + dist * math.cos(angle_world)
-                        wy = ry + dist * math.sin(angle_world)
+                # --- PROCESS SCAN DATA ---
+                current_x = []
+                current_y = []
+                
+                for i, r in enumerate(ranges):
+                    # Filter: 5cm < d < 1.2m
+                    if MIN_TRUST_DIST_M < r <= MAX_TRUST_DIST_M:
+                        # Angle logic: 
+                        # Servo 0 (Right, -90 rel) ... 90 (Front, 0 rel) ... 180 (Left, +90 rel)
+                        # Relative angle = (i - 90) degrees
+                        rel_angle_rad = math.radians(i - 90)
                         
-                        current_scan_x.append(wx)
-                        current_scan_y.append(wy)
-                        all_walls_x.append(wx)
-                        all_walls_y.append(wy)
-
-                if len(all_walls_x) > 0:
-                    wall_points.set_offsets(np.column_stack([all_walls_x, all_walls_y]))
+                        # Global angle = RobotYaw + RelativeAngle
+                        # (Note: RobotYaw 0 points +X usually, but map logic assumes +Y is forward?
+                        # Let's check AgentFirmware: 
+                        # x += dist * cos(yaw), y += dist * sin(yaw).
+                        # So Yaw=0 is +X (East).
+                        
+                        # BUT, scan logic usually treats "Forward" as aligned with Yaw.
+                        # So Forward (servo 90) should be at global angle = Yaw.
+                        # Right (servo 0) should be at global angle = Yaw - 90.
+                        # Left (servo 180) should be at global angle = Yaw + 90.
+                        # So: global_angle = Yaw + (i - 90) degrees.
+                        
+                        global_angle = ryaw + rel_angle_rad
+                        
+                        px = rx + r * math.cos(global_angle)
+                        py = ry + r * math.sin(global_angle)
+                        
+                        current_x.append(px)
+                        current_y.append(py)
+                        
+                        # Add to persistent map
+                        global_map_x.append(px)
+                        global_map_y.append(py)
+                        
+                        # Log point
+                        writer_points.writerow([recv_time, px, py])
                 
-                if len(current_scan_x) > 0:
-                    scan_points.set_offsets(np.column_stack([current_scan_x, current_scan_y]))
+                f_points.flush() # Ensure data is saved immediately
+
+                # --- UPDATE PLOTS ---
+                if global_map_x:
+                    cloud_scatter.set_offsets(np.column_stack([global_map_x, global_map_y]))
+                
+                if current_x:
+                    scan_scatter.set_offsets(np.column_stack([current_x, current_y]))
                 else:
-                    scan_points.set_offsets(np.empty((0, 2)))
+                    scan_scatter.set_offsets(np.empty((0, 2)))
 
-                ax.set_title(f"2D Map | Link: {v2v_count} | Pose: {rx:.2f},{ry:.2f} @ {math.degrees(ryaw):.0f}°", fontsize=14)
+                # Auto-scale view
+                if len(global_map_x) > 10:
+                    all_x = global_map_x + path_x
+                    all_y = global_map_y + path_y
+                    ax.set_xlim(min(all_x)-0.5, max(all_x)+0.5)
+                    ax.set_ylim(min(all_y)-0.5, max(all_y)+0.5)
+
+                ax.set_title(f"Map | Pts: {len(global_map_x)} | Pose: ({rx:.2f},{ry:.2f})", fontsize=12)
                 
-                if len(path_x) > 5:
-                    ax.set_xlim(min(path_x)-1.5, max(path_x)+1.5)
-                    ax.set_ylim(min(path_y)-1.5, max(path_y)+1.5)
-
                 fig.canvas.draw()
                 fig.canvas.flush_events()
                 
-                print(f"Agent {agent_id} | Link: {v2v_count} | Path: {len(path_x)} | Closest: {min([r for r in ranges if r > 0.01])*100.0:.0f}cm")
+                # Debug print to console (EVERY PACKET)
+                valid_points = len(current_x)
+                if ranges:
+                    # Print simplified ranges for quick check: [Left (180), Front (90), Right (0)]
+                    # Remember ranges[0] is Right, ranges[90] is Front, ranges[180] is Left
+                    r_right = ranges[0]
+                    r_front = ranges[90] if len(ranges) > 90 else 0
+                    r_left = ranges[-1]
+                    
+                    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Agent {agent_id} | "
+                          f"Pose: ({rx:.2f}, {ry:.2f}, {math.degrees(ryaw):.0f}°) | "
+                          f"Enc: {enc} | "
+                          f"Scan: {valid_points} valid pts | "
+                          f"R: {r_right*100:.0f}cm F: {r_front*100:.0f}cm L: {r_left*100:.0f}cm")
 
             except BlockingIOError:
                 plt.pause(0.01)
             except Exception as e:
                 print(f"[ERROR] Loop error: {e}")
-                
+
     except KeyboardInterrupt:
-        print("\n[EXIT] Closing Live Mapper...")
-    
-    sock.close()
-    plt.close()
+        print("\n[EXIT] Closing...")
+    finally:
+        f_telem.close()
+        f_points.close()
+        sock.close()
+        plt.close()
 
 if __name__ == '__main__':
     main()
