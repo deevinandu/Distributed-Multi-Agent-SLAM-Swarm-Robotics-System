@@ -1,54 +1,76 @@
-#define TRIG 5
-#define ECHO_MUX_OUT 34 // Common Pin on MUX
+#define ECHO_MUX_OUT 34 
 
+// MUX Address Pins
 #define A 18
 #define B 19
 #define C 21
 
+// Separate Trigger Pins
+#define TRIG1 5
+#define TRIG2 32
+
 void setup() {
   Serial.begin(115200);
 
-  pinMode(TRIG, OUTPUT);
-  pinMode(ECHO_MUX_OUT, INPUT);
-
+  // Initialize MUX Control
   pinMode(A, OUTPUT);
   pinMode(B, OUTPUT);
   pinMode(C, OUTPUT);
+  pinMode(ECHO_MUX_OUT, INPUT);
+
+  // Initialize Triggers
+  pinMode(TRIG1, OUTPUT);
+  pinMode(TRIG2, OUTPUT);
+
+  // Ensure everything starts LOW
+  digitalWrite(TRIG1, LOW);
+  digitalWrite(TRIG2, LOW);
+  digitalWrite(A, LOW);
+  digitalWrite(B, LOW);
+  digitalWrite(C, LOW);
+
+  Serial.println("System Booted. Starting Measurements...");
 }
 
-float getDistance(int channel) {
-  // Select MUX Channel
-  // A is least significant bit (bit 0), B is bit 1, C is bit 2
+float readSensor(int channel, int trigPin) {
+  // 1. SELECT MUX CHANNEL
   digitalWrite(A, bitRead(channel, 0)); 
   digitalWrite(B, bitRead(channel, 1));
   digitalWrite(C, bitRead(channel, 2));
+  
+  // Give the MUX and electrical lines a moment to settle
+  delayMicroseconds(100); 
 
-  delayMicroseconds(10); // Wait for MUX to stabilize
-
-  // Trigger the sensors
-  digitalWrite(TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG, HIGH);
+  // 2. TRIGGER SEQUENCE (Mentor's Advice: 5us LOW, 10us HIGH)
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(5); 
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
+  digitalWrite(trigPin, LOW);
 
-  // Read only the echo from the selected channel
+  // 3. LISTEN (Timeout at 30ms / ~5 meters)
   long duration = pulseIn(ECHO_MUX_OUT, HIGH, 30000);
-  return duration * 0.034 / 2;
+  
+  if (duration == 0) return -1; // No object detected
+  return (float)duration / 58.0; // Standard HC-SR04 conversion
 }
 
 void loop() {
-  float dist1 = getDistance(0); // Channel Y0
-  delay(60);                    // Wait for sound waves to clear
-  
-  float dist2 = getDistance(1); // Channel Y1
-  delay(60);
-
+  // --- SENSOR 1 ---
+  float d1 = readSensor(0, TRIG1); // Channel 0, Trig 5
   Serial.print("Sensor 1: ");
-  Serial.print(dist1);
-  Serial.print(" cm | Sensor 2: ");
-  Serial.print(dist2);
-  Serial.println(" cm");
+  if (d1 < 0) Serial.print("OUT OF RANGE");
+  else { Serial.print(d1); Serial.print(" cm"); }
+  
+  // 4. WAIT 0.5 SECONDS (500ms)
+  delay(500);
 
-  delay(200); // Frequency of updates
+  // --- SENSOR 2 ---
+  float d2 = readSensor(1, TRIG2); // Channel 1, Trig 32
+  Serial.print(" | Sensor 2: ");
+  if (d2 < 0) Serial.println("OUT OF RANGE");
+  else { Serial.print(d2); Serial.println(" cm"); }
+
+  // WAIT 0.5 SECONDS before repeating loop
+  delay(500);
 }

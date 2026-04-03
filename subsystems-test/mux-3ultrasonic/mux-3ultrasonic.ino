@@ -1,69 +1,77 @@
 #define ECHO_MUX_OUT 34 
-#define A 18
-#define B 19
-#define C 21
 
-// TRIG PINS: Sensor 1=5, Sensor 2=32, Sensor 3=33, Sensor 4=25
-int trigPins[] = {5, 32, 33, 25}; 
+// MUX Address Pins
+#define MUX_A 18
+#define MUX_B 19
+#define MUX_C 21
+
+// Individual Trigger Pins for 3 Sensors
+const int trigPins[] = {5, 16, 17}; 
+const int numSensors = 3;
 
 void setup() {
   Serial.begin(115200);
-  
-  pinMode(ECHO_MUX_OUT, INPUT);
-  pinMode(A, OUTPUT);
-  pinMode(B, OUTPUT);
-  pinMode(C, OUTPUT);
 
-  // Initialize all trigger pins as outputs and set them LOW
-  for(int i = 0; i < 4; i++) {
+  // Initialize MUX Control Pins
+  pinMode(MUX_A, OUTPUT);
+  pinMode(MUX_B, OUTPUT);
+  pinMode(MUX_C, OUTPUT);
+  pinMode(ECHO_MUX_OUT, INPUT);
+
+  // Initialize Trigger Pins
+  for (int i = 0; i < numSensors; i++) {
     pinMode(trigPins[i], OUTPUT);
-    digitalWrite(trigPins[i], LOW);
+    digitalWrite(trigPins[i], LOW); // Ensure they start LOW
   }
 
-  Serial.println("System Initialized - Individual Triggers");
+  Serial.println("--- 3 Sensor System Ready (Individual Triggers) ---");
 }
 
-float getDistance(int sensorIndex) {
-  // 1. Select the correct MUX channel for the ECHO
-  digitalWrite(A, bitRead(sensorIndex, 0)); 
-  digitalWrite(B, bitRead(sensorIndex, 1));
-  digitalWrite(C, bitRead(sensorIndex, 2));
-  delay(10); // Let the MUX switch settle
+float getDistance(int index) {
+  // 1. SELECT MUX CHANNEL (A=bit0, B=bit1, C=bit2)
+  digitalWrite(MUX_A, bitRead(index, 0)); 
+  digitalWrite(MUX_B, bitRead(index, 1));
+  digitalWrite(MUX_C, bitRead(index, 2));
+  
+  // Give MUX internal switches time to settle
+  delayMicroseconds(50); 
 
-  // 2. Trigger ONLY the specific sensor
-  digitalWrite(trigPins[sensorIndex], LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPins[sensorIndex], HIGH);
+  // 2. TRIGGER SEQUENCE (Mentor's Rule: 5us LOW, then 10us HIGH)
+  digitalWrite(trigPins[index], LOW);
+  delayMicroseconds(5); 
+  digitalWrite(trigPins[index], HIGH);
   delayMicroseconds(10);
-  digitalWrite(trigPins[sensorIndex], LOW);
+  digitalWrite(trigPins[index], LOW);
 
-  // 3. Measure the echo pulse
-  // Timeout set to 30000us (~5 meters)
+  // 3. LISTEN (Timeout at 30ms = approx 5 meters)
+  // pulseIn waits for the pin to go HIGH, then measures until it goes LOW
   long duration = pulseIn(ECHO_MUX_OUT, HIGH, 30000);
   
-  // 4. Filter out immediate noise (anything less than 2cm)
-  if (duration < 110 || duration == 0) return -1; 
+  if (duration == 0) return -1.0; // Out of range or no connection
   
-  return duration * 0.034 / 2;
+  // 4. CALCULATION (Standard conversion: microseconds / 58)
+  return (float)duration / 58.0;
 }
 
 void loop() {
-  for (int i = 0; i < 4; i++) {
-    float d = getDistance(i);
+  for (int i = 0; i < numSensors; i++) {
+    float distance = getDistance(i);
     
-    Serial.print("S"); Serial.print(i + 1); Serial.print(": ");
-    if (d < 0) {
-      Serial.print("FAIL  ");
+    Serial.print("Sensor "); Serial.print(i + 1); Serial.print(": ");
+    
+    if (distance < 0) {
+      Serial.print("FAIL/TIMEOUT");
     } else {
-      Serial.print(d, 1); // 1 decimal place
-      Serial.print("cm ");
+      Serial.print(distance, 1); // Print with 1 decimal place
+      Serial.print(" cm");
     }
-    Serial.print("| ");
+    
+    Serial.print(" | ");
 
-    // 5. CRITICAL: Wait for the sound to vanish before moving to the next sensor
-    delay(80); 
+    // 5. THE "SONIC SILENCE" DELAY
+    // 0.5 seconds as requested to ensure absolute stability
+    delay(500); 
   }
   
-  Serial.println(""); // New line after all 4 sensors
-  delay(200); // Wait a bit before the next full scan
+  Serial.println(""); // New line after all 3 sensors
 }
