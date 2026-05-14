@@ -16,13 +16,13 @@ public:
 private:
     // Left Motor  — ENA must be an OUTPUT-capable GPIO (NOT 34/35/36/39)
     const int ENB = 32;
-    const int IN3 = 33;
-    const int IN4 = 25;
+    const int IN4 = 33;
+    const int IN3 = 25;
 
     // Right Motor
     const int ENA = 14;
-    const int IN1 = 26;
-    const int IN2 = 27;
+    const int IN2 = 26;
+    const int IN1 = 27;
 
     const int freq       = 5000;
     const int resolution = 8;

@@ -28,8 +28,8 @@ const int local_port = 8888;
 // Sensor Index: 0=Front, 1=Left, 2=Back, 3=Right
 // MUX Channel:  Y0=Front, Y1=Left, Y2=Back, Y3=Right
 // A=0,B=0 -> Y0  A=1,B=0 -> Y1  A=0,B=1 -> Y2  A=1,B=1 -> Y3
-#define TRIG_FRONT  16
-#define TRIG_LEFT   17
+#define TRIG_FRONT  2
+#define TRIG_LEFT   4
 #define TRIG_BACK    5
 #define TRIG_RIGHT  13
 
@@ -54,8 +54,9 @@ const int   MOTOR_SPEED        = 190;
 const int   TURN_SPEED         = 200;
 const int   STARTUP_DELAY_SEC  = 5;
 
-// Left motor speed compensation (left is slower — boost by 15%)
-const float LEFT_SPEED_BOOST = 1.15;
+// Left motor speed compensation (left is slower — tune in 0.05 steps)
+// 1.00 = no boost | 1.15 = 15% boost | increase if still drifting left
+const float LEFT_SPEED_BOOST = 1.00;
 
 // Wall-following parameters
 const float WALL_TARGET_CM     = 25.0;  // Ideal distance from left wall (cm)
