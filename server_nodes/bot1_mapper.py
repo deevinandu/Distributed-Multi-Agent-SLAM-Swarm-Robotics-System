@@ -17,15 +17,15 @@ import os
 import time
 import datetime
 import csv
+import numpy as np
+
+# ── Matplotlib backend ────────────────────────────────────────────────────────
+# PyQt5 is installed — use Qt5Agg.  Change to 'TkAgg' if you uninstall PyQt5.
 import matplotlib
-try:
-    matplotlib.use('TkAgg')
-except Exception:
-    pass
+matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.transforms import Affine2D
-import numpy as np
 
 # ── Packet format (must match QuasarPacket in firmware) ───────────────────────
 # char[4] magic | uint8 agent_id | float x,y,yaw | int32 enc | uint32 v2v
@@ -104,6 +104,8 @@ def main():
     # ── Figure ────────────────────────────────────────────────────────────────
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 10))
+    plt.show(block=False)
+    plt.pause(0.1)  # give the window manager time to actually open
     fig.patch.set_facecolor(BG_PANEL)
     ax.set_facecolor(BG_DARK)
     ax.set_aspect('equal')
@@ -235,8 +237,12 @@ def main():
                     color='white', fontsize=11, pad=10)
                 last_title = time.time()
 
-            fig.canvas.draw()
-            fig.canvas.flush_events()
+            try:
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+            except Exception:
+                pass
+            plt.pause(0.001)  # required on Windows to process GUI events
 
             # ── Terminal ──────────────────────────────────────────────────────
             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
