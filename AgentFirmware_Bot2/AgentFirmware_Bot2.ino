@@ -288,8 +288,8 @@ void navigate() {
     float look_ahead_x = robot_x + 0.30 * cos(robot_yaw);
     float look_ahead_y = robot_y + 0.30 * sin(robot_yaw);
     if (isInForbiddenZone(look_ahead_x, look_ahead_y)) {
-        Serial.println("[ZONE] Heading into other bot's territory → Turn RIGHT 30°");
-        turn(30, false);
+        Serial.println("[ZONE] Heading into other bot's territory → Turn LEFT 30°");
+        turn(30, true); // Turn away from wall (since Bot2 is on right wall, turn left to enter center room)
         return;
     }
 
@@ -309,34 +309,34 @@ void navigate() {
 
     // PRIORITY 1: Front obstacle
     if (front_cm < 30.0) {
-        if (left_cm > 40.0) {
-            Serial.println("[NAV] FRONT BLOCKED, LEFT OPEN → Turn LEFT 15°");
-            turn(15, true);
+        if (right_cm > 40.0) {
+            Serial.println("[NAV] FRONT BLOCKED, RIGHT OPEN → Turn RIGHT 15°");
+            turn(15, false); // false = right
         } else {
-            Serial.println("[NAV] FRONT BLOCKED, LEFT CLOSED → Turn RIGHT 15°");
-            turn(15, false);
+            Serial.println("[NAV] FRONT BLOCKED, RIGHT CLOSED → Turn LEFT 15°");
+            turn(15, true);
         }
         return;
     }
 
-    // PRIORITY 2: Left wall following
+    // PRIORITY 2: Right wall following
     int base_left  = (int)(MOTOR_SPEED * LEFT_SPEED_BOOST);
     int base_right = MOTOR_SPEED;
 
-    if (left_cm > WALL_LOST_CM) {
-        Serial.println("[NAV] LEFT WALL LOST → Turn LEFT 15°");
-        turn(15, true);
+    if (right_cm > WALL_LOST_CM) {
+        Serial.println("[NAV] RIGHT WALL LOST → Turn RIGHT 15°");
+        turn(15, false);
         return;
-    } else if (left_cm < WALL_TOO_CLOSE_CM) {
+    } else if (right_cm < WALL_TOO_CLOSE_CM) {
         int correction = 40;
-        Serial.printf("[NAV] TOO CLOSE (%.0fcm) → Steer right\n", left_cm);
-        motor.drive(min(255, base_left + correction), max(80, base_right - correction));
-    } else if (left_cm > WALL_TOO_FAR_CM) {
-        int correction = 40;
-        Serial.printf("[NAV] TOO FAR (%.0fcm) → Steer left\n", left_cm);
+        Serial.printf("[NAV] TOO CLOSE (%.0fcm) → Steer left\n", right_cm);
         motor.drive(max(80, base_left - correction), min(255, base_right + correction));
+    } else if (right_cm > WALL_TOO_FAR_CM) {
+        int correction = 40;
+        Serial.printf("[NAV] TOO FAR (%.0fcm) → Steer right\n", right_cm);
+        motor.drive(min(255, base_left + correction), max(80, base_right - correction));
     } else {
-        Serial.printf("[NAV] TRACKING (%.0fcm) → Straight\n", left_cm);
+        Serial.printf("[NAV] TRACKING (%.0fcm) → Straight\n", right_cm);
         motor.drive(base_left, base_right);
     }
 
