@@ -266,7 +266,23 @@ void turn(int deg, bool left) {
     delay(200);
 }
 
-// ================= NAVIGATION (Left-Wall-Following + Territory Avoidance) =================
+// ================= NAVIGATION STATE MACHINE (Left-Wall-Following) =================
+//
+// STATES:
+//   FOLLOW       - Front clear + left wall present: drive straight w/ proportional steer
+//   CORNER_ROUND - Left wall just vanished: drive straight to physically clear the corner
+//   TURN_TO_WALL - After corner cleared: turn left in 15deg bites to re-acquire wall
+//   AVOID_FRONT  - Front blocked: turn right away from wall until front clears
+//
+// WHY: Without CORNER_ROUND the bot would immediately turn left when the wall vanishes,
+// then overshoot, see the wall again, steer right, lose the wall, turn left ... infinite loop.
+// Driving straight through the corner gap first breaks the cycle completely.
+
+enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT };
+NavState       nav_state        = FOLLOW;
+unsigned long  corner_start_ms  = 0;
+const unsigned long CORNER_ROUND_MS = 600; // ms to coast straight to clear an open corner
+
 bool checkMissionComplete() {
     float d = sqrt(robot_x*robot_x + robot_y*robot_y);
     return (total_distance_traveled > MIN_TRAVEL_DISTANCE && d < RETURN_THRESHOLD);
@@ -279,72 +295,131 @@ void navigate() {
         motor.stop(); return;
     }
 
-    // Check for territory updates from server
     checkForZoneUpdates(udp);
 
-    // Stop before deciding
-    motor.stop();
-    delay(200);
-
-    // Check if we're about to enter forbidden territory
-    float look_ahead_x = robot_x + 0.30 * cos(robot_yaw);
-    float look_ahead_y = robot_y + 0.30 * sin(robot_yaw);
-    if (isInForbiddenZone(look_ahead_x, look_ahead_y)) {
-        Serial.println("[ZONE] Heading into other bot's territory → Turn RIGHT 30°");
-        turn(30, false);
-        return;
-    }
-
-    // Read all 4 sensors (in meters)
+    // Read sensors every cycle
     float front = readFront();
     float left  = readLeft();
     float back  = readBack();
     float right = readRight();
+    float front_cm = front * 100.0f;
+    float left_cm  = left  * 100.0f;
 
-    float front_cm = front * 100.0;
-    float left_cm  = left  * 100.0;
-    float right_cm = right * 100.0;
-
-    Serial.printf("[NAV] F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm\n",
-        front_cm, left_cm, back*100, right_cm);
+    Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm\n",
+        nav_state==FOLLOW?"FOLLOW":nav_state==CORNER_ROUND?"CORNER_ROUND":
+        nav_state==TURN_TO_WALL?"TURN_TO_WALL":"AVOID_FRONT",
+        front_cm, left_cm, back*100, right*100);
 
     sendPacket(front, left, back, right);
 
-    // PRIORITY 1: Front obstacle
-    if (front_cm < 30.0) {
-        if (left_cm > 40.0) {
-            Serial.println("[NAV] FRONT BLOCKED, LEFT OPEN → Turn LEFT 15°");
-            turn(15, true);
-        } else {
-            Serial.println("[NAV] FRONT BLOCKED, LEFT CLOSED → Turn RIGHT 15°");
-            turn(15, false);
+    // ── Territory override (highest priority, hard-coded right turn) ──────────
+    float lx = robot_x + 0.30f * cos(robot_yaw);
+    float ly = robot_y + 0.30f * sin(robot_yaw);
+    if (isInForbiddenZone(lx, ly)) {
+        Serial.println("[ZONE] Other bot territory → turn RIGHT 30 deg");
+        motor.stop(); delay(150);
+        turn(30, false);
+        nav_state = FOLLOW;
+        return;
+    }
+
+    int bL = (int)(MOTOR_SPEED * LEFT_SPEED_BOOST);
+    int bR = MOTOR_SPEED;
+
+    switch (nav_state) {
+
+      // ──────────────────────────────────────────────────────────────────────
+      case FOLLOW:
+        if (front_cm < 30.0f) {
+            // Front blocked → stop and switch to avoidance
+            motor.stop(); delay(150);
+            Serial.println("[NAV] Front blocked -> AVOID_FRONT");
+            nav_state = AVOID_FRONT;
+            return;
         }
-        return;
-    }
+        if (left_cm > WALL_LOST_CM) {
+            // Wall disappeared → coast straight to clear the corner gap
+            motor.stop(); delay(100);
+            Serial.println("[NAV] Wall lost -> CORNER_ROUND");
+            corner_start_ms = millis();
+            nav_state = CORNER_ROUND;
+            return;
+        }
+        // Proportional wall tracking
+        if (left_cm < WALL_TOO_CLOSE_CM) {
+            Serial.printf("[NAV] Too close %.0fcm -> steer right\n", left_cm);
+            motor.drive(min(255, bL+50), max(60, bR-50));
+        } else if (left_cm > WALL_TOO_FAR_CM) {
+            Serial.printf("[NAV] Too far %.0fcm -> steer left\n", left_cm);
+            motor.drive(max(60, bL-50), min(255, bR+50));
+        } else {
+            Serial.printf("[NAV] Tracking %.0fcm -> straight\n", left_cm);
+            motor.drive(bL, bR);
+        }
+        delay(300);
+        motor.stop();
+        delay(100);
+        break;
 
-    // PRIORITY 2: Left wall following
-    int base_left  = (int)(MOTOR_SPEED * LEFT_SPEED_BOOST);
-    int base_right = MOTOR_SPEED;
+      // ──────────────────────────────────────────────────────────────────────
+      case CORNER_ROUND:
+        // Abort if front is suddenly blocked
+        if (front_cm < 30.0f) {
+            motor.stop(); delay(150);
+            Serial.println("[NAV] Corner aborted by front wall -> AVOID_FRONT");
+            nav_state = AVOID_FRONT;
+            return;
+        }
+        // Wall re-appeared during burst? No need to keep going
+        if (left_cm <= WALL_LOST_CM) {
+            motor.stop(); delay(100);
+            Serial.println("[NAV] Wall re-acquired during corner burst -> FOLLOW");
+            nav_state = FOLLOW;
+            return;
+        }
+        if (millis() - corner_start_ms < CORNER_ROUND_MS) {
+            // Still coasting straight
+            motor.drive(bL, bR);
+            delay(50);
+        } else {
+            // Burst done, now seek the wall
+            motor.stop(); delay(150);
+            Serial.println("[NAV] Corner burst done -> TURN_TO_WALL");
+            nav_state = TURN_TO_WALL;
+        }
+        break;
 
-    if (left_cm > WALL_LOST_CM) {
-        Serial.println("[NAV] LEFT WALL LOST → Turn LEFT 15°");
+      // ──────────────────────────────────────────────────────────────────────
+      case TURN_TO_WALL:
+        if (left_cm <= WALL_LOST_CM) {
+            // Wall found again
+            Serial.printf("[NAV] Wall found %.0fcm -> FOLLOW\n", left_cm);
+            nav_state = FOLLOW;
+            return;
+        }
+        if (front_cm < 30.0f) {
+            // Ran into wall while seeking
+            Serial.println("[NAV] Front blocked while seeking -> AVOID_FRONT");
+            nav_state = AVOID_FRONT;
+            return;
+        }
+        // Small left turn, re-check next call
+        Serial.println("[NAV] Seeking wall -> turn LEFT 15 deg");
         turn(15, true);
-        return;
-    } else if (left_cm < WALL_TOO_CLOSE_CM) {
-        int correction = 40;
-        Serial.printf("[NAV] TOO CLOSE (%.0fcm) → Steer right\n", left_cm);
-        motor.drive(min(255, base_left + correction), max(80, base_right - correction));
-    } else if (left_cm > WALL_TOO_FAR_CM) {
-        int correction = 40;
-        Serial.printf("[NAV] TOO FAR (%.0fcm) → Steer left\n", left_cm);
-        motor.drive(max(80, base_left - correction), min(255, base_right + correction));
-    } else {
-        Serial.printf("[NAV] TRACKING (%.0fcm) → Straight\n", left_cm);
-        motor.drive(base_left, base_right);
-    }
+        break;
 
-    delay(300);
-    motor.stop();
+      // ──────────────────────────────────────────────────────────────────────
+      case AVOID_FRONT:
+        if (front_cm >= 35.0f) {
+            Serial.println("[NAV] Front clear -> FOLLOW");
+            nav_state = FOLLOW;
+            return;
+        }
+        // Turn right until the front opens
+        Serial.println("[NAV] Front blocked -> turn RIGHT 15 deg");
+        turn(15, false);
+        break;
+    }
 }
 
 // ================= CORE =================
