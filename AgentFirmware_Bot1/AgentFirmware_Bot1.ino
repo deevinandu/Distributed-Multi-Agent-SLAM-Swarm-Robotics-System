@@ -345,13 +345,15 @@ void navigate() {
             nav_state = CORNER_ROUND;
             return;
         }
-        // Proportional wall tracking
+        // Physical mapping: drive(first, second) = drive(RIGHT motor, LEFT motor)
+        // RIGHT faster → robot turns LEFT. LEFT faster → robot turns RIGHT.
         if (left_cm < WALL_TOO_CLOSE_CM) {
-            Serial.printf("[NAV] Too close %.0fcm -> steer right\n", left_cm);
-            motor.drive(min(255, bL+50), max(60, bR-50));
+            // Wall dangerously close: pivot RIGHT by reversing the right motor
+            Serial.printf("[NAV] Too close %.0fcm -> pivot RIGHT (right motor reverse)\n", left_cm);
+            motor.drive(-100, min(255, bR+50));  // right motor REVERSE, left motor forward
         } else if (left_cm > WALL_TOO_FAR_CM) {
             Serial.printf("[NAV] Too far %.0fcm -> steer left\n", left_cm);
-            motor.drive(max(60, bL-50), min(255, bR+50));
+            motor.drive(min(255, bL+50), max(60, bR-50));  // right motor faster -> turns left toward wall
         } else {
             Serial.printf("[NAV] Tracking %.0fcm -> straight\n", left_cm);
             motor.drive(bL, bR);
