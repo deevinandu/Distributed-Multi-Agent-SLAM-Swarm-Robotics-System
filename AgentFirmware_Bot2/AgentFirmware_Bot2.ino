@@ -10,12 +10,12 @@
 #include <esp_now.h>
 
 // ================= CONFIGURATION =================
-#define WIFI_SSID "ONEPLUS_7T"
-#define WIFI_PASSWORD "dvhy03555"
+#define WIFI_SSID "SwarmNet"
+#define WIFI_PASSWORD "swarmrobotics"
 #define AGENT_ID 2   // <-- BOT 2
 
 // Network
-const char* agent_ip = "10.131.166.1"; // Laptop Server IP address
+const char* agent_ip = "192.168.137.1"; // Laptop Server IP address
 const int agent_port = 8888;
 const int local_port = 8889;   // Different port from Bot1 to avoid collision
 
