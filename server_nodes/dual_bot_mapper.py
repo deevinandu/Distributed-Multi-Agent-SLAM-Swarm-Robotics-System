@@ -812,6 +812,8 @@ def main():
 
                 packets_this_frame += 1
 
+                print(f"[UDP-RX] Got {len(data)} bytes from {addr}")
+
                 # Determine packet version
                 landmark_type = LM_NONE
                 if len(data) == PACKET_SIZE:
