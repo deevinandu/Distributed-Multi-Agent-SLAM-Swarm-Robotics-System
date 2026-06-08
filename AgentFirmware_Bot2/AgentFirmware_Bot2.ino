@@ -77,24 +77,88 @@ bool isInForbiddenZone(float x, float y) {
             y > forbidden_min_y - margin && y < forbidden_max_y + margin);
 }
 
-void checkForZoneUpdates(WiFiUDP& udp) {
+// ================= FRONTIER TARGET =================
+struct __attribute__((packed)) TargetPacket {
+    char  magic[4];    // "TARG"
+    float target_x;
+    float target_y;
+};
+
+float  target_x = 0, target_y = 0;
+bool   has_target = false;
+unsigned long last_target_time = 0;
+const unsigned long TARGET_TIMEOUT_MS = 10000;
+const float TARGET_REACHED_RADIUS = 0.30;
+
+// ================= NAVIGATION STATE (forward declaration) =================
+enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT, GO_TO_TARGET };
+NavState nav_state = FOLLOW;
+
+// ================= SERVER PACKET HANDLER =================
+void checkForServerPackets(WiFiUDP& udp) {
     int packetSize = udp.parsePacket();
-    if (packetSize == sizeof(ZonePacket)) {
+    if (packetSize <= 0) return;
+
+    uint8_t buf[32];
+    int len = udp.read(buf, min((int)sizeof(buf), packetSize));
+
+    if (len == sizeof(ZonePacket) && memcmp(buf, "ZONE", 4) == 0) {
         ZonePacket z;
-        udp.read((uint8_t*)&z, sizeof(z));
-        if (memcmp(z.magic, "ZONE", 4) == 0) {
-            forbidden_min_x = z.min_x;
-            forbidden_min_y = z.min_y;
-            forbidden_max_x = z.max_x;
-            forbidden_max_y = z.max_y;
-            has_forbidden_zone = true;
+        memcpy(&z, buf, sizeof(z));
+        forbidden_min_x = z.min_x;
+        forbidden_min_y = z.min_y;
+        forbidden_max_x = z.max_x;
+        forbidden_max_y = z.max_y;
+        has_forbidden_zone = (z.min_x < z.max_x && z.min_y < z.max_y);
+        if (has_forbidden_zone) {
             Serial.printf("[ZONE] Forbidden area: (%.2f,%.2f)-(%.2f,%.2f)\n",
                 z.min_x, z.min_y, z.max_x, z.max_y);
+        } else {
+            Serial.println("[ZONE] Forbidden zone LIFTED");
         }
+    }
+    else if (len >= (int)sizeof(TargetPacket) && memcmp(buf, "TARG", 4) == 0) {
+        TargetPacket t;
+        memcpy(&t, buf, sizeof(t));
+        target_x = t.target_x;
+        target_y = t.target_y;
+        has_target = true;
+        last_target_time = millis();
+        if (nav_state != AVOID_FRONT) {
+            nav_state = GO_TO_TARGET;
+        }
+        Serial.printf("[TARGET] Assigned frontier: (%.2f, %.2f)\n", target_x, target_y);
     }
 }
 
-// ================= PROTOCOL =================
+// ================= LANDMARK DETECTION =================
+#define LM_NONE     0
+#define LM_CORNER_L 1
+#define LM_CORNER_R 2
+#define LM_CORRIDOR 3
+#define LM_DEAD_END 4
+#define LM_OPEN     5
+
+uint8_t detectLandmark(float front_cm, float left_cm, float back_cm, float right_cm) {
+    const float close_thresh = 40.0;
+    const float open_thresh  = 80.0;
+
+    bool f_close = front_cm < close_thresh;
+    bool l_close = left_cm  < close_thresh;
+    bool r_close = right_cm < close_thresh;
+    bool f_open  = front_cm > open_thresh;
+    bool l_open  = left_cm  > open_thresh;
+    bool r_open  = right_cm > open_thresh;
+
+    if (f_close && l_close && r_close) return LM_DEAD_END;
+    if (f_close && l_close)            return LM_CORNER_L;
+    if (f_close && r_close)            return LM_CORNER_R;
+    if (l_close && r_close && f_open)  return LM_CORRIDOR;
+    if (f_open  && l_open  && r_open)  return LM_OPEN;
+    return LM_NONE;
+}
+
+// ================= PROTOCOL (QuasarPacket v2) =================
 struct __attribute__((packed)) QuasarPacket {
     char     magic[4];          // "QSRL"
     uint8_t  agent_id;
@@ -107,6 +171,7 @@ struct __attribute__((packed)) QuasarPacket {
     float    dist_left;
     float    dist_back;
     float    dist_right;
+    uint8_t  landmark_type;     // Geometric signature for SLAM loop closure
 };
 
 // ================= GLOBALS =================
@@ -119,8 +184,7 @@ sensor_msgs__msg__Imu current_imu;
 volatile long    encoder_count       = 0;
 volatile int32_t global_encoder_total = 0;
 
-// Bot2 initial position offset (will be set based on separation from Bot1)
-float robot_x   = 0.0;   // Server will offset this based on initial separation
+float robot_x   = 0.0;
 float robot_y   = 0.0;
 float robot_yaw = 0.0;
 float total_distance_traveled = 0.0;
@@ -191,8 +255,23 @@ void readIMU() {
     }
 }
 
+// ================= ODOMETRY =================
+void updateOdometry() {
+    noInterrupts();
+    long counts = encoder_count;
+    encoder_count = 0;
+    interrupts();
+
+    if (counts > 0) {
+        float m = (counts * CM_PER_GROOVE) / 100.0;
+        robot_x += m * cos(robot_yaw);
+        robot_y += m * sin(robot_yaw);
+        total_distance_traveled += m;
+    }
+}
+
 // ================= TELEMETRY =================
-void sendPacket(float front, float left, float back, float right) {
+void sendPacket(float front, float left, float back, float right, uint8_t landmark) {
     QuasarPacket p;
     memcpy(p.magic, "QSRL", 4);
     p.agent_id      = AGENT_ID;
@@ -205,78 +284,74 @@ void sendPacket(float front, float left, float back, float right) {
     p.dist_left     = left;
     p.dist_back     = back;
     p.dist_right    = right;
+    p.landmark_type = landmark;
 
     IPAddress bIp; bIp.fromString(agent_ip);
     udp.beginPacket(bIp, agent_port);
     udp.write((const uint8_t*)&p, sizeof(p));
     udp.endPacket();
 
-    Serial.printf("[PKT] Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm\n",
+    Serial.printf("[PKT] Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm | LM:%d\n",
         robot_x, robot_y, degrees(robot_yaw),
-        front*100, left*100, back*100, right*100);
+        front*100, left*100, back*100, right*100, landmark);
 }
 
 // ================= MOVEMENT =================
-void moveForwardReactive() {
-    noInterrupts(); encoder_count = 0; interrupts();
-
-    int left_fwd = min(255, (int)(MOTOR_SPEED * LEFT_SPEED_BOOST));
-    motor.drive(left_fwd, MOTOR_SPEED);
-    Serial.printf("[MOVE] Forward (L:%d R:%d) until 30cm...\n", left_fwd, MOTOR_SPEED);
-
-    unsigned long start = millis();
-    while (millis() - start < 15000) {
-        float d = readFront();
-        if (encoder_count % 5 == 0)
-            Serial.printf("  Enc:%d | Front:%.2fm\n", encoder_count, d);
-        if (d < OBSTACLE_THRESHOLD) {
-            Serial.println("[HALT] 30cm front trigger!");
-            break;
-        }
-        delay(30);
-    }
-    motor.stop();
-
-    float m = (encoder_count * CM_PER_GROOVE) / 100.0;
-    robot_x += m * cos(robot_yaw);
-    robot_y += m * sin(robot_yaw);
-    total_distance_traveled += m;
-}
-
 void turn(int deg, bool left) {
     Serial.printf("[TURN] %s %d° ...\n", left ? "LEFT" : "RIGHT", deg);
 
-    unsigned long turn_ms = (unsigned long)(deg * 10);
+    updateOdometry();
 
     int left_spd  = left ? (int)(TURN_SPEED * LEFT_SPEED_BOOST) : -(int)(TURN_SPEED * LEFT_SPEED_BOOST);
     int right_spd = left ? -TURN_SPEED : TURN_SPEED;
     left_spd = constrain(left_spd, -255, 255);
 
-    motor.drive(left_spd, right_spd);
-    Serial.printf("[TURN] Motors L=%d R=%d for %lums\n", left_spd, right_spd, turn_ms);
+    double target_rad = radians(deg);
+    double integrated_yaw = 0.0;
+    unsigned long last_time = micros();
+    unsigned long start_time = millis();
+    const unsigned long TURN_TIMEOUT_MS = 5000; // 5 seconds safety timeout
 
-    delay(turn_ms);
+    motor.drive(left_spd, right_spd);
+    Serial.printf("[TURN] Motors L=%d R=%d (Target: %.3f rad)\n", left_spd, right_spd, target_rad);
+
+    while (fabs(integrated_yaw) < target_rad && (millis() - start_time) < TURN_TIMEOUT_MS) {
+        delay(2);
+        unsigned long now = micros();
+        double dt = (double)(now - last_time) / 1000000.0;
+        last_time = now;
+
+        sensors_event_t a, g, temp;
+        if (mpu.getEvent(&a, &g, &temp)) {
+            double gyro_z = g.gyro.z - gyroZ_offset;
+            integrated_yaw += gyro_z * dt;
+        }
+    }
+
     motor.stop();
+    Serial.printf("[TURN] Stopped. Target: %d deg, Integrated: %.2f deg, Time: %lu ms\n",
+                  deg, degrees(integrated_yaw), millis() - start_time);
 
     robot_yaw += radians(left ? deg : -deg);
     while (robot_yaw >  PI) robot_yaw -= 2 * PI;
     while (robot_yaw < -PI) robot_yaw += 2 * PI;
 
+    noInterrupts(); encoder_count = 0; interrupts();
+
     delay(200);
 }
 
-// ================= NAVIGATION STATE MACHINE (Right-Wall-Following) =================
+// ================= NAVIGATION STATE MACHINE (Right-Wall-Following + Go-To-Target) =================
+//
+// Mirror of Bot1 logic — Bot2 hugs the RIGHT wall.
 //
 // STATES:
 //   FOLLOW       - Front clear + right wall present: drive straight w/ proportional steer
-//   CORNER_ROUND - Right wall just vanished: drive straight to physically clear the corner
-//   TURN_TO_WALL - After corner cleared: turn right in 15deg bites to re-acquire wall
+//   CORNER_ROUND - Right wall just vanished: drive straight to clear the corner
+//   TURN_TO_WALL - After corner cleared: turn right in 15° bites to re-acquire wall
 //   AVOID_FRONT  - Front blocked: turn left away from wall until front clears
-//
-// Mirror of Bot1 logic (Bot2 hugs the RIGHT wall).
+//   GO_TO_TARGET - Server assigned frontier waypoint: drive toward (target_x, target_y)
 
-enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT };
-NavState       nav_state        = FOLLOW;
 unsigned long  corner_start_ms  = 0;
 const unsigned long CORNER_ROUND_MS = 600;
 
@@ -292,7 +367,9 @@ void navigate() {
         motor.stop(); return;
     }
 
-    checkForZoneUpdates(udp);
+    checkForServerPackets(udp);
+
+    updateOdometry();
 
     float front = readFront();
     float left  = readLeft();
@@ -300,21 +377,24 @@ void navigate() {
     float right = readRight();
     float front_cm = front * 100.0f;
     float right_cm = right * 100.0f;
+    float left_cm  = left  * 100.0f;
 
-    Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm\n",
+    uint8_t landmark = detectLandmark(front_cm, left_cm, back*100, right_cm);
+
+    Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm | LM:%d\n",
         nav_state==FOLLOW?"FOLLOW":nav_state==CORNER_ROUND?"CORNER_ROUND":
-        nav_state==TURN_TO_WALL?"TURN_TO_WALL":"AVOID_FRONT",
-        front_cm, left*100, back*100, right_cm);
+        nav_state==TURN_TO_WALL?"TURN_TO_WALL":nav_state==AVOID_FRONT?"AVOID_FRONT":"GO_TO_TARGET",
+        front_cm, left_cm, back*100, right_cm, landmark);
 
-    sendPacket(front, left, back, right);
+    sendPacket(front, left, back, right, landmark);
 
-    // -- Territory override (highest priority, turns left away from right wall) --
+    // ── Territory override (turns LEFT — away from right wall) ───────────────
     float lx = robot_x + 0.30f * cos(robot_yaw);
     float ly = robot_y + 0.30f * sin(robot_yaw);
     if (isInForbiddenZone(lx, ly)) {
         Serial.println("[ZONE] Other bot territory -> turn LEFT 30 deg");
         motor.stop(); delay(150);
-        turn(30, true);
+        turn(30, true);    // Bot 2 turns LEFT (away from right wall)
         nav_state = FOLLOW;
         return;
     }
@@ -324,7 +404,7 @@ void navigate() {
 
     switch (nav_state) {
 
-      // -------------------------------------------------------------------------
+      // ──────────────────────────────────────────────────────────────────────
       case FOLLOW:
         if (front_cm < 30.0f) {
             motor.stop(); delay(150);
@@ -339,11 +419,13 @@ void navigate() {
             nav_state = CORNER_ROUND;
             return;
         }
-        // Proportional wall tracking (right wall: too close -> steer left, too far -> steer right)
+        // Proportional wall tracking (right wall)
         if (right_cm < WALL_TOO_CLOSE_CM) {
+            // Too close to right wall → steer LEFT
             Serial.printf("[NAV] Too close %.0fcm -> steer left\n", right_cm);
             motor.drive(max(60, bL-50), min(255, bR+50));
         } else if (right_cm > WALL_TOO_FAR_CM) {
+            // Too far from right wall → steer RIGHT
             Serial.printf("[NAV] Too far %.0fcm -> steer right\n", right_cm);
             motor.drive(min(255, bL+50), max(60, bR-50));
         } else {
@@ -355,7 +437,7 @@ void navigate() {
         delay(100);
         break;
 
-      // -------------------------------------------------------------------------
+      // ──────────────────────────────────────────────────────────────────────
       case CORNER_ROUND:
         if (front_cm < 30.0f) {
             motor.stop(); delay(150);
@@ -379,7 +461,7 @@ void navigate() {
         }
         break;
 
-      // -------------------------------------------------------------------------
+      // ──────────────────────────────────────────────────────────────────────
       case TURN_TO_WALL:
         if (right_cm <= WALL_LOST_CM) {
             Serial.printf("[NAV] Wall found %.0fcm -> FOLLOW\n", right_cm);
@@ -391,20 +473,72 @@ void navigate() {
             nav_state = AVOID_FRONT;
             return;
         }
+        // Turn RIGHT to re-acquire the right wall
         Serial.println("[NAV] Seeking wall -> turn RIGHT 15 deg");
         turn(15, false);
         break;
 
-      // -------------------------------------------------------------------------
+      // ──────────────────────────────────────────────────────────────────────
       case AVOID_FRONT:
         if (front_cm >= 35.0f) {
-            Serial.println("[NAV] Front clear -> FOLLOW");
-            nav_state = FOLLOW;
+            if (has_target && millis() - last_target_time < TARGET_TIMEOUT_MS) {
+                Serial.println("[NAV] Front clear -> GO_TO_TARGET");
+                nav_state = GO_TO_TARGET;
+            } else {
+                Serial.println("[NAV] Front clear -> FOLLOW");
+                nav_state = FOLLOW;
+            }
             return;
         }
+        // Turn LEFT (away from right wall) until front opens
         Serial.println("[NAV] Front blocked -> turn LEFT 15 deg");
         turn(15, true);
         break;
+
+      // ──────────────────────────────────────────────────────────────────────
+      case GO_TO_TARGET: {
+        if (!has_target || millis() - last_target_time > TARGET_TIMEOUT_MS) {
+            Serial.println("[NAV] Target expired -> FOLLOW");
+            has_target = false;
+            nav_state = FOLLOW;
+            return;
+        }
+
+        if (front_cm < 30.0f) {
+            motor.stop(); delay(150);
+            Serial.println("[NAV] Front blocked during go-to-target -> AVOID_FRONT");
+            nav_state = AVOID_FRONT;
+            return;
+        }
+
+        float dist_to_target = sqrt(pow(target_x - robot_x, 2) + pow(target_y - robot_y, 2));
+        if (dist_to_target < TARGET_REACHED_RADIUS) {
+            Serial.printf("[NAV] Target reached (%.2fm away) -> FOLLOW\n", dist_to_target);
+            has_target = false;
+            nav_state = FOLLOW;
+            return;
+        }
+
+        float desired_yaw = atan2(target_y - robot_y, target_x - robot_x);
+        float heading_error = desired_yaw - robot_yaw;
+        while (heading_error >  PI) heading_error -= 2 * PI;
+        while (heading_error < -PI) heading_error += 2 * PI;
+
+        if (fabs(heading_error) > radians(15)) {
+            int deg = min(30, (int)(fabs(heading_error) * 180.0 / PI));
+            if (deg < 5) deg = 5;
+            Serial.printf("[NAV] Heading to target: err=%.0f° -> turn %s %d°\n",
+                degrees(heading_error), heading_error > 0 ? "LEFT" : "RIGHT", deg);
+            turn(deg, heading_error > 0);
+        } else {
+            Serial.printf("[NAV] Driving to target (%.2fm away)\n", dist_to_target);
+            motor.drive(bL, bR);
+            delay(300);
+            motor.stop();
+            delay(100);
+        }
+        break;
+      }
     }
 }
 
@@ -502,8 +636,9 @@ void loop() {
     msg.angular_velocity.z    = current_imu.angular_velocity.z;
     msg.linear_acceleration.x = current_imu.linear_acceleration.x;
     ekf.predict(msg, now/1000.0);
-    nav_msgs__msg__Odometry o = ekf.getOdom();
-    robot_yaw = 2.0 * atan2(o.pose.pose.orientation.z, o.pose.pose.orientation.w);
+
+    // NOTE: robot_yaw is NOT overwritten from EKF output.
+    // Yaw is maintained purely by commanded turn angles in turn().
 
     if (now - startup_time > (unsigned long)STARTUP_DELAY_SEC * 1000) {
         navigate();
