@@ -15,7 +15,7 @@
 #define AGENT_ID 1   // <-- BOT 1
 
 // Network
-const char* agent_ip = "10.218.44.255"; // Broadcast address
+const char* agent_ip = "10.131.166.1"; // Laptop Server IP address
 const int agent_port = 8888;
 const int local_port = 8888;
 
@@ -297,13 +297,19 @@ void sendPacket(float front, float left, float back, float right, uint8_t landma
     p.landmark_type = landmark;
 
     IPAddress bIp; bIp.fromString(agent_ip);
-    udp.beginPacket(bIp, agent_port);
-    udp.write((const uint8_t*)&p, sizeof(p));
-    udp.endPacket();
+    int begin_ok = udp.beginPacket(bIp, agent_port);
+    int write_len = udp.write((const uint8_t*)&p, sizeof(p));
+    int end_ok = udp.endPacket();
 
-    Serial.printf("[PKT] Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm | LM:%d\n",
-        robot_x, robot_y, degrees(robot_yaw),
-        front*100, left*100, back*100, right*100, landmark);
+    if (!begin_ok || write_len != sizeof(p) || !end_ok) {
+        Serial.printf("[PKT-ERR] Send failed! Target:%s:%d | begin=%d write=%d/%d end=%d\n", 
+                      agent_ip, agent_port, begin_ok, write_len, (int)sizeof(p), end_ok);
+    } else {
+        Serial.printf("[PKT] To:%s:%d | Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm | LM:%d\n",
+            agent_ip, agent_port,
+            robot_x, robot_y, degrees(robot_yaw),
+            front*100, left*100, back*100, right*100, landmark);
+    }
 }
 
 // ================= MOVEMENT =================
