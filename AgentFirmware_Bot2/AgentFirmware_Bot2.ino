@@ -47,8 +47,8 @@ const float CM_PER_GROOVE = 30.0 / 28.0;
 // Navigation Parameters
 const float OBSTACLE_THRESHOLD = 0.30;  // 30cm
 const float SAFE_DISTANCE      = 0.50;  // 50cm
-const int   MOTOR_SPEED        = 190;
-const int   TURN_SPEED         = 200;
+const int   MOTOR_SPEED        = 195;
+const int   TURN_SPEED         = 205;
 const int   STARTUP_DELAY_SEC  = 5;
 
 // Left motor speed compensation
@@ -56,7 +56,7 @@ const float LEFT_SPEED_BOOST = 1.00;
 
 // Wall-following parameters
 const float WALL_TARGET_CM     = 25.0;
-const float WALL_TOO_CLOSE_CM  = 8.0;
+const float WALL_TOO_CLOSE_CM  = 10.0;
 const float WALL_TOO_FAR_CM    = 40.0;
 const float WALL_LOST_CM       = 80.0;
 
