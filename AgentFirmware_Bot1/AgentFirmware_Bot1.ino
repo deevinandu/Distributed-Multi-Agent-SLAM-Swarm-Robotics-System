@@ -46,8 +46,8 @@ const float CM_PER_GROOVE = 30.0 / 28.0;
 // Navigation Parameters
 const float OBSTACLE_THRESHOLD = 0.30;  // 30cm
 const float SAFE_DISTANCE      = 0.50;  // 50cm
-const int   MOTOR_SPEED        = 190;
-const int   TURN_SPEED         = 200;
+const int   MOTOR_SPEED        = 195;
+const int   TURN_SPEED         = 205;
 const int   STARTUP_DELAY_SEC  = 5;
 
 // Left motor speed compensation
@@ -55,7 +55,7 @@ const float LEFT_SPEED_BOOST = 1.00;
 
 // Wall-following parameters
 const float WALL_TARGET_CM     = 25.0;
-const float WALL_TOO_CLOSE_CM  = 8.0;
+const float WALL_TOO_CLOSE_CM  = 15.0;
 const float WALL_TOO_FAR_CM    = 40.0;
 const float WALL_LOST_CM       = 80.0;
 
@@ -95,6 +95,33 @@ void checkForZoneUpdates(WiFiUDP& udp) {
     }
 }
 
+// ================= LANDMARK DETECTION =================
+#define LM_NONE     0
+#define LM_CORNER_L 1   // Front + Left walls close
+#define LM_CORNER_R 2   // Front + Right walls close
+#define LM_CORRIDOR 3   // Left + Right walls close, front open
+#define LM_DEAD_END 4   // Front + Left + Right walls close
+#define LM_OPEN     5   // All directions open
+
+uint8_t detectLandmark(float front_cm, float left_cm, float back_cm, float right_cm) {
+    const float close_thresh = 40.0;  // cm
+    const float open_thresh  = 80.0;  // cm
+
+    bool f_close = front_cm < close_thresh;
+    bool l_close = left_cm  < close_thresh;
+    bool r_close = right_cm < close_thresh;
+    bool f_open  = front_cm > open_thresh;
+    bool l_open  = left_cm  > open_thresh;
+    bool r_open  = right_cm > open_thresh;
+
+    if (f_close && l_close && r_close) return LM_DEAD_END;
+    if (f_close && l_close)            return LM_CORNER_L;
+    if (f_close && r_close)            return LM_CORNER_R;
+    if (l_close && r_close && f_open)  return LM_CORRIDOR;
+    if (f_open  && l_open  && r_open)  return LM_OPEN;
+    return LM_NONE;
+}
+
 // ================= PROTOCOL =================
 struct __attribute__((packed)) QuasarPacket {
     char     magic[4];          // "QSRL"
@@ -108,6 +135,7 @@ struct __attribute__((packed)) QuasarPacket {
     float    dist_left;
     float    dist_back;
     float    dist_right;
+    uint8_t  landmark_type;     // Geometric signature for SLAM loop closure
 };
 
 // ================= GLOBALS =================
@@ -189,8 +217,23 @@ void readIMU() {
     current_imu.linear_acceleration.x = IMU.getAccelX_mss() - accX_offset;
 }
 
+// ================= ODOMETRY =================
+void updateOdometry() {
+    noInterrupts();
+    long counts = encoder_count;
+    encoder_count = 0;
+    interrupts();
+
+    if (counts > 0) {
+        float m = (counts * CM_PER_GROOVE) / 100.0;
+        robot_x += m * cos(robot_yaw);
+        robot_y += m * sin(robot_yaw);
+        total_distance_traveled += m;
+    }
+}
+
 // ================= TELEMETRY =================
-void sendPacket(float front, float left, float back, float right) {
+void sendPacket(float front, float left, float back, float right, uint8_t landmark) {
     QuasarPacket p;
     memcpy(p.magic, "QSRL", 4);
     p.agent_id      = AGENT_ID;
@@ -203,6 +246,7 @@ void sendPacket(float front, float left, float back, float right) {
     p.dist_left     = left;
     p.dist_back     = back;
     p.dist_right    = right;
+    p.landmark_type = landmark;
 
     IPAddress bIp; bIp.fromString(agent_ip);
     int begin_ok = udp.beginPacket(bIp, agent_port);
@@ -213,10 +257,10 @@ void sendPacket(float front, float left, float back, float right) {
         Serial.printf("[PKT-ERR] Send failed! Target:%s:%d | begin=%d write=%d/%d end=%d\n", 
                       agent_ip, agent_port, begin_ok, write_len, (int)sizeof(p), end_ok);
     } else {
-        Serial.printf("[PKT] To:%s:%d | Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm\n",
+        Serial.printf("[PKT] To:%s:%d | Pose:(%.2f,%.2f,%.0f°) | F:%.0fcm L:%.0fcm B:%.0fcm R:%.0fcm | LM:%d\n",
             agent_ip, agent_port,
             robot_x, robot_y, degrees(robot_yaw),
-            front*100, left*100, back*100, right*100);
+            front*100, left*100, back*100, right*100, landmark);
     }
 }
 
@@ -250,6 +294,8 @@ void moveForwardReactive() {
 void turn(int deg, bool left) {
     Serial.printf("[TURN] %s %d° ...\n", left ? "LEFT" : "RIGHT", deg);
 
+    updateOdometry();
+
     unsigned long turn_ms = (unsigned long)(deg * 10);
 
     int left_spd  = left ? (int)(TURN_SPEED * LEFT_SPEED_BOOST) : -(int)(TURN_SPEED * LEFT_SPEED_BOOST);
@@ -265,6 +311,8 @@ void turn(int deg, bool left) {
     robot_yaw += radians(left ? deg : -deg);
     while (robot_yaw >  PI) robot_yaw -= 2 * PI;
     while (robot_yaw < -PI) robot_yaw += 2 * PI;
+
+    noInterrupts(); encoder_count = 0; interrupts();
 
     delay(200);
 }
@@ -300,6 +348,8 @@ void navigate() {
 
     checkForZoneUpdates(udp);
 
+    updateOdometry();
+
     // Read sensors every cycle
     float front = readFront();
     float left  = readLeft();
@@ -307,13 +357,17 @@ void navigate() {
     float right = readRight();
     float front_cm = front * 100.0f;
     float left_cm  = left  * 100.0f;
+    float right_cm = right * 100.0f;
+    float back_cm  = back  * 100.0f;
 
-    Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm\n",
+    uint8_t landmark = detectLandmark(front_cm, left_cm, back_cm, right_cm);
+
+    Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm | LM:%d\n",
         nav_state==FOLLOW?"FOLLOW":nav_state==CORNER_ROUND?"CORNER_ROUND":
         nav_state==TURN_TO_WALL?"TURN_TO_WALL":"AVOID_FRONT",
-        front_cm, left_cm, back*100, right*100);
+        front_cm, left_cm, back_cm, right_cm, landmark);
 
-    sendPacket(front, left, back, right);
+    sendPacket(front, left, back, right, landmark);
 
     // ── Territory override (highest priority, hard-coded right turn) ──────────
     float lx = robot_x + 0.30f * cos(robot_yaw);
