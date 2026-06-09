@@ -948,43 +948,43 @@ def main():
 
                 # Assign frontiers to bots (greedy nearest, with separation)
                 target_assignments = {}
-                used_centroids = set()
+                # used_centroids = set()
 
-                online_bots = [bid for bid in [1, 2]
-                               if bot_states.get(bid, {}).get('online', False)]
+                # online_bots = [bid for bid in [1, 2]
+                #                if bot_states.get(bid, {}).get('online', False)]
 
-                for bot_id in online_bots:
-                    bx = bot_states[bot_id]['x']
-                    by = bot_states[bot_id]['y']
+                # for bot_id in online_bots:
+                #     bx = bot_states[bot_id]['x']
+                #     by = bot_states[bot_id]['y']
 
-                    best_dist = float('inf')
-                    best_idx  = -1
+                #     best_dist = float('inf')
+                #     best_idx  = -1
 
-                    for i, (cx, cy) in enumerate(centroids):
-                        if i in used_centroids:
-                            continue
+                #     for i, (cx, cy) in enumerate(centroids):
+                #         if i in used_centroids:
+                #             continue
 
-                        # Check minimum separation from other assigned targets
-                        too_close = False
-                        for other_bid, (tx, ty) in target_assignments.items():
-                            if math.sqrt((cx - tx)**2 + (cy - ty)**2) < FRONTIER_SEPARATION:
-                                too_close = True
-                                break
-                        if too_close:
-                            continue
+                #         # Check minimum separation from other assigned targets
+                #         too_close = False
+                #         for other_bid, (tx, ty) in target_assignments.items():
+                #             if math.sqrt((cx - tx)**2 + (cy - ty)**2) < FRONTIER_SEPARATION:
+                #                 too_close = True
+                #                 break
+                #         if too_close:
+                #             continue
 
-                        dist = math.sqrt((bx - cx)**2 + (by - cy)**2)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_idx = i
+                #         dist = math.sqrt((bx - cx)**2 + (by - cy)**2)
+                #         if dist < best_dist:
+                #             best_dist = dist
+                #             best_idx = i
 
-                    if best_idx >= 0:
-                        target_assignments[bot_id] = centroids[best_idx]
-                        used_centroids.add(best_idx)
+                #     if best_idx >= 0:
+                #         target_assignments[bot_id] = centroids[best_idx]
+                #         used_centroids.add(best_idx)
 
                 # Send targets to bots
-                for bot_id, (tx, ty) in target_assignments.items():
-                    send_target_to_bot(sock, bot_addrs[bot_id], tx, ty)
+                # for bot_id, (tx, ty) in target_assignments.items():
+                #     send_target_to_bot(sock, bot_addrs[bot_id], tx, ty)
 
             # -- Render ---------------------------------------------------------
             renderer.render(
