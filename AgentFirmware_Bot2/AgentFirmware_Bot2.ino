@@ -117,6 +117,7 @@ void checkForServerPackets(WiFiUDP& udp) {
             Serial.println("[ZONE] Forbidden zone LIFTED");
         }
     }
+    /*
     else if (len >= (int)sizeof(TargetPacket) && memcmp(buf, "TARG", 4) == 0) {
         TargetPacket t;
         memcpy(&t, buf, sizeof(t));
@@ -129,6 +130,7 @@ void checkForServerPackets(WiFiUDP& udp) {
         }
         Serial.printf("[TARGET] Assigned frontier: (%.2f, %.2f)\n", target_x, target_y);
     }
+    */
 }
 
 // ================= LANDMARK DETECTION =================
