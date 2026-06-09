@@ -2,8 +2,7 @@
 #include <WiFi.h>
 #include <WiFiUDP.h>
 #include <Wire.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
+#include "MPU9250.h"
 
 #include "ekf.h"
 #include "motor_control.h"
@@ -187,7 +186,7 @@ struct __attribute__((packed)) QuasarPacket {
 // ================= GLOBALS =================
 WiFiUDP           udp;
 MotorController   motor;
-Adafruit_MPU6050  mpu;
+MPU9250 IMU(Wire, 0x68);
 EKF               ekf;
 
 sensor_msgs__msg__Imu current_imu;
@@ -258,11 +257,9 @@ float readBack()  { return readSensor(2); }
 float readRight() { return readSensor(3); }
 
 void readIMU() {
-    sensors_event_t a, g, temp;
-    if (mpu.getEvent(&a, &g, &temp)) {
-        current_imu.angular_velocity.z    = g.gyro.z - gyroZ_offset;
-        current_imu.linear_acceleration.x = a.acceleration.x - accX_offset;
-    }
+    IMU.readSensor();
+    current_imu.angular_velocity.z    = IMU.getGyroZ_rads() - gyroZ_offset;
+    current_imu.linear_acceleration.x = IMU.getAccelX_mss() - accX_offset;
 }
 
 // ================= ODOMETRY =================
@@ -340,11 +337,9 @@ void turn(int deg, bool left) {
         double dt = (double)(now - last_time) / 1000000.0;
         last_time = now;
 
-        sensors_event_t a, g, temp;
-        if (mpu.getEvent(&a, &g, &temp)) {
-            double gyro_z = g.gyro.z - gyroZ_offset;
-            integrated_yaw += gyro_z * dt;
-        }
+        IMU.readSensor();
+        double gyro_z = IMU.getGyroZ_rads() - gyroZ_offset;
+        integrated_yaw += gyro_z * dt;
     }
 
     motor.stop();
@@ -582,19 +577,18 @@ void setup() {
     Wire.begin(21, 22);
     Wire.setClock(100000);
 
-    Serial.println("[BOOT] MPU6050...");
-    if (!mpu.begin()) {
-        Serial.println("[ERROR] MPU6050 not found!");
+    Serial.println("[BOOT] MPU9250...");
+    int status = IMU.begin();
+    if (status < 0) {
+        Serial.println("[ERROR] MPU9250 not found!");
         while(1) delay(1000);
     }
-    Serial.println("[BOOT] MPU6050 OK. Calibrating...");
+    Serial.println("[BOOT] MPU9250 OK. Calibrating...");
     float gz_sum = 0, ax_sum = 0;
     for (int i = 0; i < 50; i++) {
-        sensors_event_t a, g, t;
-        if (mpu.getEvent(&a, &g, &t)) {
-            gz_sum += g.gyro.z;
-            ax_sum += a.acceleration.x;
-        }
+        IMU.readSensor();
+        gz_sum += IMU.getGyroZ_rads();
+        ax_sum += IMU.getAccelX_mss();
         delay(20);
     }
     gyroZ_offset = gz_sum / 50;
