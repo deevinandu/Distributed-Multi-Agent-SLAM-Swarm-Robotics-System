@@ -56,7 +56,7 @@ const float LEFT_SPEED_BOOST = 1.00;
 // Wall-following parameters
 const float WALL_TARGET_CM     = 25.0;
 const float WALL_TOO_CLOSE_CM  = 15.0;
-const float WALL_TOO_FAR_CM    = 40.0;
+const float WALL_TOO_FAR_CM    = 30.0;
 const float WALL_LOST_CM       = 80.0;
 
 // ================= TERRITORY AVOIDANCE =================
