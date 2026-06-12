@@ -1,0 +1,16 @@
+# Session logs (auto-generated during runs)
+server_nodes/logs/
+
+# Arduino build artifacts
+build/
+*.bin
+*.elf
+*.map
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code
+.vscode/

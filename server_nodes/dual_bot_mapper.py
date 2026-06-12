@@ -441,8 +441,8 @@ class MapRenderer:
         # Draw occupancy grid overlay
         self._draw_occupancy(occ_grid)
 
-        # Draw frontier centroids
-        self._draw_frontiers(frontier_centroids)
+        # Draw frontier centroids (disabled)
+        # self._draw_frontiers(frontier_centroids)
 
         # Draw territory zone boxes
         self._draw_zones(zone_boxes)
@@ -517,9 +517,8 @@ class MapRenderer:
                 sx, sy = self.world_to_screen(wx, wy)
 
                 if val == CELL_OCCUPIED:
-                    color = CELL_COLOR_OCCUPIED
-                else:
-                    color = CELL_COLOR_FREE
+                    continue  # Don't draw occupied cells
+                color = CELL_COLOR_FREE
 
                 if cell_px <= 2:
                     self.screen.set_at((sx, sy), color)
@@ -552,17 +551,27 @@ class MapRenderer:
                 pygame.draw.rect(self.screen, color, (sx1, sy1, w, h), 1)
 
     def _draw_point_cloud(self, bot_id, cloud_dict):
-        """Draw sensor point cloud dots."""
+        """Draw sensor point cloud dots (block-averaged to reduce noise)."""
+        #AVG_WINDOW = 5  # average every N raw readings into one plotted point
         for sensor_name, points in cloud_dict.items():
             if not points:
                 continue
             color = BOT_COLORS[bot_id].get(sensor_name, (150, 150, 150))
             # Draw only the last N points for performance
             recent = points[-2000:]
+            # Bot 1 left + Bot 2 right sensors → 8×8 rectangles for wall scan visibility
+            use_rect = (bot_id == 1 and sensor_name == 'left') or \
+                       (bot_id == 2 and sensor_name == 'right')
+            rect_size = 8
             for wx, wy in recent:
                 sx, sy = self.world_to_screen(wx, wy)
                 if 0 <= sx < self.width and 0 <= sy < self.height:
-                    self.screen.set_at((sx, sy), color)
+                    if use_rect:
+                        pygame.draw.rect(self.screen, color,
+                                         (sx - rect_size // 2, sy - rect_size // 2,
+                                          rect_size, rect_size))
+                    else:
+                        self.screen.set_at((sx, sy), color)
 
     def _draw_path(self, bot_id, path):
         """Draw robot trajectory path."""
@@ -703,8 +712,8 @@ def compute_bounding_box(points_x, points_y):
 
 def main():
     parser = argparse.ArgumentParser(description="Dual-Bot Mission Control Server")
-    parser.add_argument('--separation', type=float, default=0.5,
-                        help='Initial separation between bots in meters (default: 0.5)')
+    parser.add_argument('--separation', type=float, default=0.0,
+                        help='Initial separation between bots in meters (default: 0.0)')
     parser.add_argument('--port', type=int, default=8888,
                         help='UDP port to listen on (default: 8888)')
     args = parser.parse_args()

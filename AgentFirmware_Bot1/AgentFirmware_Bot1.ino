@@ -38,7 +38,7 @@ const int MUX_B_BITS[4]  = {0, 0, 1, 1};
 
 // ---- Encoder ----
 #define ENCODER_PIN 15
-const float CM_PER_GROOVE = 30.0 / 28.0;
+const float CM_PER_GROOVE = 21.0 / 20.0;
 
 // ---- Sound Speed ----
 #define SOUND_SPEED 0.0343f  // cm/us
@@ -95,6 +95,7 @@ const float TARGET_REACHED_RADIUS = 0.30;       // 30cm
 
 // ================= NAVIGATION STATE (forward declaration) =================
 enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT, GO_TO_TARGET };
+bool returning_home = false;
 NavState nav_state = FOLLOW;
 
 // ================= SERVER PACKET HANDLER =================
@@ -343,18 +344,14 @@ void turn(int deg, bool left) {
     }
 
     motor.stop();
-    Serial.printf("[TURN] Stopped. Target: %d deg, Integrated: %.2f deg, Time: %lu ms\n",
-                  deg, degrees(integrated_yaw), millis() - start_time);
-
-    // Update yaw using the COMMANDED angle (not IMU — avoids drift).
-    // The server knows exact turn commands so it can reconstruct heading.
-    robot_yaw += radians(left ? deg : -deg);
+    // HARDCODED MAP FIX FOR 22 DEGREES
+    int applied_deg = (deg == 15) ? 22 : deg;
+    robot_yaw += radians(left ? applied_deg : -applied_deg);
+    
     while (robot_yaw >  PI) robot_yaw -= 2 * PI;
     while (robot_yaw < -PI) robot_yaw += 2 * PI;
 
-    // Clear encoder counts from the turn (rotation, not translation)
     noInterrupts(); encoder_count = 0; interrupts();
-
     delay(200);
 }
 
@@ -376,8 +373,21 @@ unsigned long  corner_start_ms  = 0;
 const unsigned long CORNER_ROUND_MS = 600;
 
 bool checkMissionComplete() {
-    float d = sqrt(robot_x*robot_x + robot_y*robot_y);
-    return (total_distance_traveled > MIN_TRAVEL_DISTANCE && d < RETURN_THRESHOLD);
+    return false;
+}
+
+void smartDelay(unsigned long ms) {
+    unsigned long start = millis();
+    unsigned long last_tx = millis();
+    while (millis() - start < ms) {
+        updateOdometry();
+        if (millis() - last_tx >= 100) {
+            // Send dummy distances (0) just to update position on the map
+            sendPacket(0, 0, 0, 0, 0); 
+            last_tx = millis();
+        }
+        delay(5);
+    }
 }
 
 void navigate() {
@@ -411,6 +421,16 @@ void navigate() {
 
     sendPacket(front, left, back, right, landmark);
 
+    // --- RETURN HOME INJECTION LOGIC ---
+    if (!returning_home && total_distance_traveled > 2.5 && abs(robot_x) < 0.35) {
+        Serial.println("[NAV] CENTER CROSSED! Abandoning wall, returning to base.");
+        returning_home = true;
+        nav_state = GO_TO_TARGET;
+        target_x = 0.0;
+        target_y = 0.0;
+        has_target = true;
+    }
+
     // ── Territory override (highest priority) ────────────────────────────────
     float lx = robot_x + 0.30f * cos(robot_yaw);
     float ly = robot_y + 0.30f * sin(robot_yaw);
@@ -436,7 +456,7 @@ void navigate() {
             return;
         }
         if (left_cm > WALL_LOST_CM) {
-            motor.stop(); delay(100);
+            motor.stop(); smartDelay(100);
             Serial.println("[NAV] Wall lost -> CORNER_ROUND");
             corner_start_ms = millis();
             nav_state = CORNER_ROUND;
@@ -452,9 +472,9 @@ void navigate() {
             Serial.printf("[NAV] Tracking %.0fcm -> straight\n", left_cm);
             motor.drive(bL, bR);
         }
-        delay(300);
+        smartDelay(300);
         motor.stop();
-        delay(100);
+        smartDelay(100);
         break;
 
       // ──────────────────────────────────────────────────────────────────────
@@ -466,7 +486,7 @@ void navigate() {
             return;
         }
         if (left_cm <= WALL_LOST_CM) {
-            motor.stop(); delay(100);
+            motor.stop(); smartDelay(100);
             Serial.println("[NAV] Wall re-acquired during corner burst -> FOLLOW");
             nav_state = FOLLOW;
             return;
@@ -517,29 +537,48 @@ void navigate() {
 
       // ──────────────────────────────────────────────────────────────────────
       case GO_TO_TARGET: {
-        // Check if target is still valid (server refreshes every 3s)
-        if (!has_target || millis() - last_target_time > TARGET_TIMEOUT_MS) {
+        if (!returning_home && (!has_target || millis() - last_target_time > TARGET_TIMEOUT_MS)) {
             Serial.println("[NAV] Target expired -> FOLLOW");
             has_target = false;
             nav_state = FOLLOW;
             return;
         }
 
-        // Front obstacle takes priority
+        // Front obstacle check (Serves as Finish Line if returning home)
         if (front_cm < 30.0f) {
-            motor.stop(); delay(150);
-            Serial.println("[NAV] Front blocked during go-to-target -> AVOID_FRONT");
-            nav_state = AVOID_FRONT;
-            return;
+            if (returning_home) {
+                Serial.println("[DONE] Reached the wall! Mission Complete!");
+                mission_complete = true;
+                motor.stop();
+                return;
+            } else {
+                motor.stop(); delay(150);
+                Serial.println("[NAV] Front blocked -> AVOID_FRONT");
+                nav_state = AVOID_FRONT;
+                return;
+            }
         }
 
         // Check if we reached the target
         float dist_to_target = sqrt(pow(target_x - robot_x, 2) + pow(target_y - robot_y, 2));
+        
+        // Target reached check
         if (dist_to_target < TARGET_REACHED_RADIUS) {
-            Serial.printf("[NAV] Target reached (%.2fm away) -> FOLLOW\n", dist_to_target);
-            has_target = false;
-            nav_state = FOLLOW;
-            return;
+            if (returning_home) {
+                // We reached mathematical 0,0 but haven't hit the physical wall yet.
+                // Just keep driving straight until the front sensor hits 30cm!
+                Serial.println("[NAV] At origin, looking for wall...");
+                motor.drive(bL, bR);
+                smartDelay(300);
+                motor.stop();
+                smartDelay(100);
+                return;
+            } else {
+                Serial.printf("[NAV] Target reached -> FOLLOW\n");
+                has_target = false;
+                nav_state = FOLLOW;
+                return;
+            }
         }
 
         // Compute heading error to target
@@ -559,9 +598,9 @@ void navigate() {
             // Drive forward toward target
             Serial.printf("[NAV] Driving to target (%.2fm away)\n", dist_to_target);
             motor.drive(bL, bR);
-            delay(300);
+            smartDelay(300);
             motor.stop();
-            delay(100);
+            smartDelay(100);
         }
         break;
       }
