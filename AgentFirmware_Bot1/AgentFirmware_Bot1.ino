@@ -46,8 +46,8 @@ const float CM_PER_GROOVE = 21.0 / 20.0;
 // Navigation Parameters
 const float OBSTACLE_THRESHOLD = 0.30;  // 30cm
 const float SAFE_DISTANCE      = 0.50;  // 50cm
-const int   MOTOR_SPEED        = 195;
-const int   TURN_SPEED         = 205;
+const int   MOTOR_SPEED        = 205;
+const int   TURN_SPEED         = 215;
 const int   STARTUP_DELAY_SEC  = 5;
 
 // Left motor speed compensation
@@ -94,7 +94,7 @@ const unsigned long TARGET_TIMEOUT_MS = 10000;  // 10s — fall back to wall-fol
 const float TARGET_REACHED_RADIUS = 0.30;       // 30cm
 
 // ================= NAVIGATION STATE (forward declaration) =================
-enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT, GO_TO_TARGET };
+enum NavState { FOLLOW, CORNER_ROUND, TURN_TO_WALL, AVOID_FRONT, GO_TO_TARGET, RETURN_HOME_STRAIGHT };
 bool returning_home = false;
 NavState nav_state = FOLLOW;
 
@@ -416,19 +416,21 @@ void navigate() {
 
     Serial.printf("[NAV] %-12s | F:%.0f L:%.0f B:%.0f R:%.0f cm | LM:%d\n",
         nav_state==FOLLOW?"FOLLOW":nav_state==CORNER_ROUND?"CORNER_ROUND":
-        nav_state==TURN_TO_WALL?"TURN_TO_WALL":nav_state==AVOID_FRONT?"AVOID_FRONT":"GO_TO_TARGET",
+        nav_state==TURN_TO_WALL?"TURN_TO_WALL":nav_state==AVOID_FRONT?"AVOID_FRONT":
+        nav_state==RETURN_HOME_STRAIGHT?"RETURN_HOME_STR":"GO_TO_TARGET",
         front_cm, left_cm, back*100, right_cm, landmark);
 
     sendPacket(front, left, back, right, landmark);
 
     // --- RETURN HOME INJECTION LOGIC ---
     if (!returning_home && total_distance_traveled > 2.5 && abs(robot_x) < 0.35) {
-        Serial.println("[NAV] CENTER CROSSED! Abandoning wall, returning to base.");
+        Serial.println("[NAV] CENTER CROSSED! Turning to return straight to base.");
         returning_home = true;
-        nav_state = GO_TO_TARGET;
-        target_x = 0.0;
-        target_y = 0.0;
-        has_target = true;
+        motor.stop(); delay(150);
+        turn(15, false); // Right turn
+        turn(15, false); // Right turn
+        nav_state = RETURN_HOME_STRAIGHT;
+        return;
     }
 
     // ── Territory override (highest priority) ────────────────────────────────
@@ -536,27 +538,35 @@ void navigate() {
         break;
 
       // ──────────────────────────────────────────────────────────────────────
+      case RETURN_HOME_STRAIGHT:
+        if (front_cm < 30.0f) {
+            Serial.println("[DONE] Reached the wall! Mission Complete!");
+            mission_complete = true;
+            motor.stop();
+            return;
+        }
+        Serial.printf("[NAV] Returning home straight\n");
+        motor.drive(bL, bR);
+        smartDelay(300);
+        motor.stop();
+        smartDelay(100);
+        break;
+
+      // ──────────────────────────────────────────────────────────────────────
       case GO_TO_TARGET: {
-        if (!returning_home && (!has_target || millis() - last_target_time > TARGET_TIMEOUT_MS)) {
+        if (!has_target || millis() - last_target_time > TARGET_TIMEOUT_MS) {
             Serial.println("[NAV] Target expired -> FOLLOW");
             has_target = false;
             nav_state = FOLLOW;
             return;
         }
 
-        // Front obstacle check (Serves as Finish Line if returning home)
+        // Front obstacle check
         if (front_cm < 30.0f) {
-            if (returning_home) {
-                Serial.println("[DONE] Reached the wall! Mission Complete!");
-                mission_complete = true;
-                motor.stop();
-                return;
-            } else {
-                motor.stop(); delay(150);
-                Serial.println("[NAV] Front blocked -> AVOID_FRONT");
-                nav_state = AVOID_FRONT;
-                return;
-            }
+            motor.stop(); delay(150);
+            Serial.println("[NAV] Front blocked -> AVOID_FRONT");
+            nav_state = AVOID_FRONT;
+            return;
         }
 
         // Check if we reached the target
@@ -564,21 +574,10 @@ void navigate() {
         
         // Target reached check
         if (dist_to_target < TARGET_REACHED_RADIUS) {
-            if (returning_home) {
-                // We reached mathematical 0,0 but haven't hit the physical wall yet.
-                // Just keep driving straight until the front sensor hits 30cm!
-                Serial.println("[NAV] At origin, looking for wall...");
-                motor.drive(bL, bR);
-                smartDelay(300);
-                motor.stop();
-                smartDelay(100);
-                return;
-            } else {
-                Serial.printf("[NAV] Target reached -> FOLLOW\n");
-                has_target = false;
-                nav_state = FOLLOW;
-                return;
-            }
+            Serial.printf("[NAV] Target reached -> FOLLOW\n");
+            has_target = false;
+            nav_state = FOLLOW;
+            return;
         }
 
         // Compute heading error to target
